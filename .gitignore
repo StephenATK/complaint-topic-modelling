@@ -1,0 +1,6 @@
+data/complaints_raw.csv
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/

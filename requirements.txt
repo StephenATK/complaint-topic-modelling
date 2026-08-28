@@ -1,0 +1,12 @@
+pandas
+numpy
+scikit-learn
+nltk
+gensim
+joblib
+streamlit
+matplotlib
+pyLDAvis
+wordcloud
+fpdf2
+python-pptx
