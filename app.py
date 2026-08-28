@@ -24,6 +24,7 @@ from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 import pyLDAvis
+from pyLDAvis._prepare import js_MMDS
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from preprocessing import preprocess_text
@@ -660,7 +661,14 @@ def build_pyldavis_html(_model, feature_names, doc_topic, _doc_term_matrix, mode
     normalized to sum to 1 before handing them to pyLDAvis (which expects
     genuine distributions). Leading-underscore args are excluded from Streamlit's
     cache key since models/sparse matrices aren't reliably hashable; feature_names,
-    doc_topic, and model_choice are hashable and determine cache validity."""
+    doc_topic, and model_choice are hashable and determine cache validity.
+
+    Uses mmds (metric MDS, an iterative optimization) instead of pyLDAvis's default
+    pcoa (eigenvalue-based) for positioning topic bubbles. pcoa can produce tiny
+    negative eigenvalues on real-world topic distance matrices - especially with
+    NMF's manually-normalized (non-native) distributions - and taking the square
+    root of a negative eigenvalue produces a complex number, which then crashes
+    JSON serialization. mmds can't produce complex values by construction."""
     topic_term = _model.components_
     topic_term_dists = topic_term / topic_term.sum(axis=1, keepdims=True)
     doc_topic_dists = doc_topic / doc_topic.sum(axis=1, keepdims=True)
@@ -674,6 +682,7 @@ def build_pyldavis_html(_model, feature_names, doc_topic, _doc_term_matrix, mode
         vocab=feature_names,
         term_frequency=term_frequency,
         sort_topics=False,
+        mds=js_MMDS,
     )
     return pyLDAvis.prepared_data_to_html(vis_data)
 
@@ -933,11 +942,19 @@ elif page == "Topic Explorer":
         "are to each other. Click a bubble to see its top terms, or hover over a bar to see "
         "which topics use that term most."
     )
-    with st.spinner("Building interactive map (this can take a few seconds)..."):
-        source_matrix = count_vectorizer.transform(df["clean_text"]) if model_choice == "LDA" \
-            else tfidf_vectorizer.transform(df["clean_text"])
-        vis_html = build_pyldavis_html(model, feature_names, doc_topic, source_matrix, model_choice)
-    st.iframe(vis_html, height=800)
+    try:
+        with st.spinner("Building interactive map (this can take a few seconds)..."):
+            source_matrix = count_vectorizer.transform(df["clean_text"]) if model_choice == "LDA" \
+                else tfidf_vectorizer.transform(df["clean_text"])
+            vis_html = build_pyldavis_html(model, feature_names, doc_topic, source_matrix, model_choice)
+        st.iframe(vis_html, height=800)
+    except Exception:
+        st.info(
+            "The interactive map couldn't be generated for this model/topic count combination "
+            "(a numerical edge case in the underlying visualization library). The word clouds "
+            "and keyword lists above still fully represent each topic - try switching between "
+            "LDA and NMF, as the issue is often specific to one model's output."
+        )
 
 # ============================================================
 # PAGE: Model Comparison
