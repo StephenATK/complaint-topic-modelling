@@ -989,16 +989,31 @@ elif page == "Model Comparison":
         st.info("Run `python src/evaluation.py` first to generate data/n_topics_sweep.csv.")
 
     st.subheader("Summary")
-    comparison_df = pd.DataFrame({
-        "Metric": ["Topic Coherence (c_v)", "Topic Diversity"],
-        "LDA": ["-", "-"],
-        "NMF": ["-", "-"],
-    })
-    st.table(comparison_df)
-    st.caption(
-        "Fill the Topic Diversity row in with values from your own diversity calculation, "
-        "and add 1-2 sentences below on which model won and why."
-    )
+    metrics_path = "data/final_model_metrics.csv"
+    if os.path.exists(metrics_path):
+        comparison_df = pd.read_csv(metrics_path)
+        st.table(comparison_df.set_index("Metric"))
+
+        lda_coh = comparison_df.loc[comparison_df["Metric"] == "Topic Coherence (c_v)", "LDA"].iloc[0]
+        nmf_coh = comparison_df.loc[comparison_df["Metric"] == "Topic Coherence (c_v)", "NMF"].iloc[0]
+        winner = "NMF" if nmf_coh >= lda_coh else "LDA"
+        st.success(
+            f"**{winner}** scores higher on topic coherence "
+            f"({'NMF' if winner == 'NMF' else 'LDA'}: {max(lda_coh, nmf_coh):.3f} vs "
+            f"{'LDA' if winner == 'NMF' else 'NMF'}: {min(lda_coh, nmf_coh):.3f}), "
+            f"suggesting its topics are more internally coherent for this corpus."
+        )
+    else:
+        comparison_df = pd.DataFrame({
+            "Metric": ["Topic Coherence (c_v)", "Topic Diversity"],
+            "LDA": ["-", "-"],
+            "NMF": ["-", "-"],
+        })
+        st.table(comparison_df.set_index("Metric"))
+        st.caption(
+            "Run `python src/final_metrics.py` from the terminal to compute these "
+            "numbers automatically from your final trained models."
+        )
 
 # ============================================================
 # PAGE: Try It Yourself
