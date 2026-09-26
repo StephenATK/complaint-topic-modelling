@@ -1,0 +1,16 @@
+{
+  "NMF": {
+    "0": {"name": "Inaccurate Credit Reports", "style": "Complaint issue"},
+    "1": {"name": "FCRA Dispute Letters", "style": "Legal template"},
+    "2": {"name": "Unrecognized Accounts", "style": "Complaint issue"},
+    "3": {"name": "Debt Validation Requests", "style": "Complaint issue"},
+    "4": {"name": "FDCPA Violations", "style": "Complaint issue"},
+    "5": {"name": "Contract Violations", "style": "Legal template"},
+    "6": {"name": "Disputed Amounts", "style": "Legal template"},
+    "7": {"name": "Repeated Collection Calls", "style": "Narrative account"},
+    "8": {"name": "Identity Theft", "style": "Narrative account"},
+    "9": {"name": "CFR Violation Claims", "style": "Legal template"},
+    "10": {"name": "Alleged Debt / Cease Requests", "style": "Complaint issue"}
+  },
+  "LDA": {}
+}

@@ -16,6 +16,8 @@ from wordcloud import WordCloud
 import sys
 import os
 import io
+import re
+import json
 import tempfile
 from datetime import datetime
 from fpdf import FPDF, XPos, YPos
@@ -23,11 +25,10 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
-import pyLDAvis
-from pyLDAvis._prepare import js_MMDS
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from preprocessing import preprocess_text
+from topic_map import build_topic_map_html
 
 st.set_page_config(
     page_title="Customer Complaint Topic Explorer",
@@ -35,7 +36,34 @@ st.set_page_config(
     layout="wide",
 )
 
-st.session_state.setdefault("topic_labels", {})
+MODEL_OPTIONS = ["NMF", "LDA"]  # NMF first: it won on coherence and diversity
+MODEL_CAPTIONS = {"NMF": "NMF (best model)", "LDA": "LDA"}
+LABELS_PATH = "data/topic_labels.json"
+
+
+def load_label_file():
+    """Reads data/topic_labels.json into ({model: {idx: name}}, {model: {idx: style}}).
+    A missing or broken file falls back to empty dicts, so topics show as 'Topic N'."""
+    try:
+        with open(LABELS_PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        raw = {}
+    names, styles = {}, {}
+    for model_key in MODEL_OPTIONS:
+        entries = raw.get(model_key, {}) or {}
+        names[model_key] = {int(k): v.get("name", f"Topic {k}") for k, v in entries.items()}
+        styles[model_key] = {int(k): v["style"] for k, v in entries.items() if v.get("style")}
+    return names, styles
+
+
+FILE_LABELS, TOPIC_STYLES = load_label_file()
+
+# Session copy of the names, so edits in the "Name your topics" panel apply
+# everywhere during a visit. Seeded from the saved file on first load.
+if not isinstance(st.session_state.get("topic_labels"), dict) or \
+        not all(m in st.session_state["topic_labels"] for m in MODEL_OPTIONS):
+    st.session_state["topic_labels"] = {m: dict(FILE_LABELS[m]) for m in MODEL_OPTIONS}
 st.session_state.setdefault("app_theme", "Day")
 
 # --- Fixed brand palette: used only by exported PDF/PPTX reports, which always
@@ -324,6 +352,84 @@ st.markdown(
     .pipeline-step-desc {{
         color: {THEME["text_secondary"]} !important;
     }}
+
+    /* Banner text is always white, whatever the theme's global text colour */
+    .stApp .app-header, .stApp .app-header * {{
+        color: #FFFFFF !important;
+    }}
+    .app-header-title {{
+        font-size: 1.9rem;
+        font-weight: 700;
+        line-height: 1.2;
+        margin: 0;
+    }}
+    .app-header-subtitle {{
+        font-size: 0.98rem;
+        opacity: 0.92;
+        margin-top: 0.35rem;
+    }}
+
+    /* Hide the round radio dot in the sidebar nav; the pill highlight shows the selection.
+       :not(:has(p)) guarantees the element holding the page name is never hidden, whatever
+       Streamlit version is installed. */
+    section[data-testid="stSidebar"] div[role="radiogroup"] label > div > div:first-child:not([data-testid]):not(:has(p)) {{
+        display: none;
+    }}
+
+    .cloud-title {{
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin: 0.4rem 0 0.2rem 0;
+        line-height: 1.3;
+    }}
+
+    /* Topic style badge (complaint issue / legal template / narrative account) */
+    .style-badge {{
+        display: inline-block;
+        padding: 0.18rem 0.7rem;
+        border-radius: 999px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: #FFFFFF !important;
+        vertical-align: middle;
+        margin: 0.15rem 0 0.9rem 0;
+    }}
+    .topic-title {{
+        font-size: 1.45rem;
+        font-weight: 700;
+        margin: 0.2rem 0 0.35rem 0;
+        line-height: 1.25;
+    }}
+    .complaint-quote {{
+        background-color: {THEME["card_bg"]};
+        border: 1px solid {THEME["card_border"]};
+        border-radius: 10px;
+        padding: 0.9rem 1.1rem;
+        margin-bottom: 0.7rem;
+        font-size: 0.93rem;
+        line-height: 1.55;
+        color: {THEME["text"]};
+    }}
+    .complaint-meta {{
+        font-size: 0.8rem;
+        color: {THEME["text_secondary"]};
+        margin-bottom: 0.35rem;
+    }}
+
+    /* Tabs pick up the theme's accent colour */
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 0.4rem;
+    }}
+    .stTabs [data-baseweb="tab"] p {{
+        font-weight: 600;
+        font-size: 0.98rem;
+    }}
+    .stTabs [aria-selected="true"] p {{
+        color: {THEME["nav_selected_bg"]} !important;
+    }}
+    .stTabs [data-baseweb="tab-highlight"] {{
+        background-color: {THEME["nav_selected_bg"]} !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -331,39 +437,21 @@ st.markdown(
 
 
 def page_header(title, subtitle):
-    """Consistent gradient banner header used at the top of every page.
-    Colors are set as inline styles with !important - nothing in the external
-    stylesheet (including the broad theme text-color rules) can override an
-    inline !important, so this is guaranteed correct regardless of Streamlit's
-    internal HTML structure, which isn't something we can rely on assumptions about."""
+    """Gradient banner at the top of every page.
+
+    Uses plain <div>s rather than <h1>/<p>: Streamlit wraps heading text in an
+    inner <span>, and the theme's global span colour was painting that span navy,
+    which is why the title looked dark on the banner. The .app-header * rule in the
+    stylesheet forces everything inside the banner to white as a second guard."""
     st.markdown(
         f"""
         <div class="app-header">
-            <h1 style="color:#FFFFFF !important; margin:0; font-size:1.9rem; font-weight:700;">{title}</h1>
-            <p style="color:#FFFFFF !important; opacity:0.92; margin:0.25rem 0 0 0; font-size:0.95rem;">{subtitle}</p>
+            <div class="app-header-title">{title}</div>
+            <div class="app-header-subtitle">{subtitle}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-
-def render_wordcloud(freq_or_text, colormap="Blues", bg_color="white"):
-    """Accepts either a raw text string or a {word: weight} dict and renders a word cloud.
-    bg_color should match the current theme so there's no white box on dark themes."""
-    wc = WordCloud(
-        width=1000, height=400, background_color=bg_color,
-        colormap=colormap, max_words=100, prefer_horizontal=0.95,
-    )
-    if isinstance(freq_or_text, dict):
-        wc = wc.generate_from_frequencies(freq_or_text)
-    else:
-        wc = wc.generate(freq_or_text)
-    fig, ax = plt.subplots(figsize=(10, 4))
-    fig.patch.set_facecolor(bg_color)
-    ax.imshow(wc, interpolation="bilinear")
-    ax.axis("off")
-    fig.tight_layout(pad=0)
-    return fig
 
 
 def themed_axes(fig, ax):
@@ -400,10 +488,102 @@ def pdf_safe(text):
     return text.encode("latin-1", "replace").decode("latin-1")
 
 
-def get_topic_label(idx):
-    """Returns the human-assigned name for a topic if one's been set (via the
-    Topic Explorer page's 'Name Your Topics' panel), otherwise falls back to 'Topic N'."""
-    return st.session_state["topic_labels"].get(idx, f"Topic {idx}")
+def get_topic_label(idx, model_choice="NMF"):
+    """Returns the saved or edited name for a topic of the given model,
+    falling back to 'Topic N'. Names are stored per model, because NMF's
+    Topic 3 and LDA's Topic 3 are unrelated topics."""
+    idx = int(idx)
+    return st.session_state["topic_labels"].get(model_choice, {}).get(idx, f"Topic {idx}")
+
+
+STYLE_COLORS = {
+    "Complaint issue": "#2f5b93",
+    "Legal template": "#f47a21",
+    "Narrative account": "#2f95b8",
+}
+
+
+def get_topic_style(idx, model_choice="NMF"):
+    return TOPIC_STYLES.get(model_choice, {}).get(int(idx))
+
+
+def style_badge(style):
+    """Small coloured pill showing how a topic's complaints tend to be written."""
+    if not style:
+        return ""
+    color = STYLE_COLORS.get(style, "#5e5e5f")
+    return f"<span class='style-badge' style='background-color:{color};'>{style}</span>"
+
+
+def clean_redactions(text):
+    """CFPB masks personal details as XXXX, XX/XX/XXXX and so on. Replace those
+    runs with a readable marker when showing real complaints on screen."""
+    text = re.sub(r"\bX{2,}(?:[/\-]X{2,})*\b", "[redacted]", str(text))
+    text = re.sub(r"\{\$[\d,.]+\}", lambda m: m.group(0)[1:-1], text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def blend_hex(start_hex, end_hex, amount):
+    """Colour `amount` of the way from start_hex to end_hex (0 = start, 1 = end)."""
+    a, b = hex_to_rgb(start_hex), hex_to_rgb(end_hex)
+    mixed = [round(x + (y - x) * amount) for x, y in zip(a, b)]
+    return "#{:02x}{:02x}{:02x}".format(*mixed)
+
+
+@st.cache_data(show_spinner=False)
+def wordcloud_png(freq_items, color_hex, bg_color, width=1000, height=420):
+    """Cached word cloud as PNG bytes. freq_items is a tuple of (word, weight)
+    pairs so Streamlit can hash it; the colormap runs from the page background
+    into the topic's colour so clouds sit naturally on both themes."""
+    cmap = LinearSegmentedColormap.from_list("t", [blend_hex(bg_color, color_hex, 0.45), color_hex])
+    wc = WordCloud(
+        width=width, height=height, background_color=bg_color, colormap=cmap,
+        max_words=100, prefer_horizontal=0.95, random_state=42,
+    ).generate_from_frequencies(dict(freq_items))
+    buf = io.BytesIO()
+    wc.to_image().save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def topic_top_terms(model, feature_names, topic_idx, n=30):
+    weights = model.components_[topic_idx]
+    top = weights.argsort()[::-1][:n]
+    return tuple((str(feature_names[i]), float(weights[i])) for i in top)
+
+
+def topic_distribution_chart(dist, model_choice, total_docs, height_per_bar=0.42):
+    """Horizontal bars sorted by size, labelled with topic names, counts and shares.
+    Easier to read than vertical bars with rotated names."""
+    order = dist.sort_values(ascending=True)
+    fig, ax = plt.subplots(figsize=(9, height_per_bar * len(order) + 0.9))
+    themed_axes(fig, ax)
+    colors = [UI_TOPIC_COLORS[i % len(UI_TOPIC_COLORS)] for i in order.index]
+    labels = [f"{i}. {get_topic_label(i, model_choice)}" for i in order.index]
+    bars = ax.barh(labels, order.values, color=colors)
+    peak = max(order.values) if len(order) else 1
+    for bar, value in zip(bars, order.values):
+        share = value / total_docs if total_docs else 0
+        ax.text(bar.get_width() + peak * 0.012, bar.get_y() + bar.get_height() / 2,
+                f"{value:,}  ({share:.0%})", va="center", fontsize=9, color=THEME["text_secondary"])
+    ax.set_xlim(0, peak * 1.2)
+    ax.set_xlabel("Complaints")
+    ax.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
+def distribution_table(dist, model_choice, total_docs):
+    """Topic counts as a DataFrame, used for the CSV download."""
+    rows = []
+    for idx, count in dist.sort_values(ascending=False).items():
+        rows.append({
+            "topic_number": int(idx),
+            "topic_name": get_topic_label(idx, model_choice),
+            "writing_style": get_topic_style(idx, model_choice) or "",
+            "complaints": int(count),
+            "share_pct": round(count / total_docs * 100, 2) if total_docs else 0,
+        })
+    return pd.DataFrame(rows)
 
 
 def generate_executive_summary(dist_series, total_docs, model_choice):
@@ -413,7 +593,7 @@ def generate_executive_summary(dist_series, total_docs, model_choice):
     top_count = int(dist_series.max())
     top_pct = (top_count / total_docs * 100) if total_docs else 0
     n_topics = len(dist_series)
-    label = get_topic_label(top_idx)
+    label = get_topic_label(top_idx, model_choice)
     return (
         f"Across {total_docs:,} complaints analyzed with {model_choice}, the largest topic — "
         f"\"{label}\" — accounts for {top_pct:.0f}% of documents ({top_count:,} complaints). "
@@ -453,7 +633,7 @@ def build_pdf_report(new_df, assignments, topic_dist, model, feature_names, mode
     # --- Chart: documents per topic, in brand colors, labeled with custom topic names ---
     fig, ax = plt.subplots(figsize=(7, 3.2))
     bar_colors = [TOPIC_COLORS[i % len(TOPIC_COLORS)] for i in dist.index]
-    labels_x = [get_topic_label(i) for i in dist.index]
+    labels_x = [get_topic_label(i, model_choice) for i in dist.index]
     ax.bar(labels_x, dist.values, color=bar_colors)
     ax.set_ylabel("Documents")
     ax.set_title("Documents per Topic")
@@ -514,7 +694,7 @@ def build_pdf_report(new_df, assignments, topic_dist, model, feature_names, mode
 
             pdf.set_font("Helvetica", "B", 10)
             pdf.set_text_color(*hex_to_rgb(TOPIC_COLORS[i % len(TOPIC_COLORS)]))
-            pdf.multi_cell(0, 5.5, pdf_safe(f"{get_topic_label(i)}  ({doc_count} documents)"),
+            pdf.multi_cell(0, 5.5, pdf_safe(f"{get_topic_label(i, model_choice)}  ({doc_count} documents)"),
                             new_x=XPos.LMARGIN, new_y=YPos.NEXT)
             pdf.set_font("Helvetica", "", 9)
             pdf.set_text_color(60, 60, 60)
@@ -546,7 +726,7 @@ def build_pptx_report(new_df, assignments, topic_dist, model, feature_names, mod
 
     fig, ax = plt.subplots(figsize=(8, 4.2))
     bar_colors = [TOPIC_COLORS[i % len(TOPIC_COLORS)] for i in dist.index]
-    labels_x = [get_topic_label(i) for i in dist.index]
+    labels_x = [get_topic_label(i, model_choice) for i in dist.index]
     ax.bar(labels_x, dist.values, color=bar_colors)
     ax.set_ylabel("Documents")
     ax.set_title("Documents per Topic")
@@ -611,7 +791,7 @@ def build_pptx_report(new_df, assignments, topic_dist, model, feature_names, mod
 
             slide_k = prs.slides.add_slide(blank_layout)
             color = RGBColor(*hex_to_rgb(TOPIC_COLORS[i % len(TOPIC_COLORS)]))
-            _pptx_slide_header(slide_k, get_topic_label(i), color, prs)
+            _pptx_slide_header(slide_k, get_topic_label(i, model_choice), color, prs)
 
             count_tb = slide_k.shapes.add_textbox(Inches(0.8), Inches(1.25), Inches(11.5), Inches(0.6))
             count_tb.text_frame.text = f"{doc_count} documents"
@@ -655,36 +835,41 @@ def get_top_words(model, feature_names, n_top=10):
 
 
 @st.cache_data(show_spinner=False)
-def build_pyldavis_html(_model, feature_names, doc_topic, _doc_term_matrix, model_choice):
-    """Builds an interactive pyLDAvis topic map. Works for both LDA and NMF -
-    NMF's outputs aren't proper probability distributions by default, so they're
-    normalized to sum to 1 before handing them to pyLDAvis (which expects
-    genuine distributions). Leading-underscore args are excluded from Streamlit's
-    cache key since models/sparse matrices aren't reliably hashable; feature_names,
-    doc_topic, and model_choice are hashable and determine cache validity.
+def read_prebuilt_map(path, modified_time):
+    """modified_time is part of the cache key, so a rebuilt file is picked up."""
+    with open(path, encoding="utf-8") as f:
+        return f.read()
 
-    Uses mmds (metric MDS, an iterative optimization) instead of pyLDAvis's default
-    pcoa (eigenvalue-based) for positioning topic bubbles. pcoa can produce tiny
-    negative eigenvalues on real-world topic distance matrices - especially with
-    NMF's manually-normalized (non-native) distributions - and taking the square
-    root of a negative eigenvalue produces a complex number, which then crashes
-    JSON serialization. mmds can't produce complex values by construction."""
-    topic_term = _model.components_
-    topic_term_dists = topic_term / topic_term.sum(axis=1, keepdims=True)
-    doc_topic_dists = doc_topic / doc_topic.sum(axis=1, keepdims=True)
-    doc_lengths = np.asarray(_doc_term_matrix.sum(axis=1)).flatten()
-    term_frequency = np.asarray(_doc_term_matrix.sum(axis=0)).flatten()
 
-    vis_data = pyLDAvis.prepare(
-        topic_term_dists=topic_term_dists,
-        doc_topic_dists=doc_topic_dists,
-        doc_lengths=doc_lengths,
-        vocab=feature_names,
-        term_frequency=term_frequency,
-        sort_topics=False,
-        mds=js_MMDS,
-    )
-    return pyLDAvis.prepared_data_to_html(vis_data)
+@st.cache_data(show_spinner=False)
+def build_topic_map_live(_model, feature_names, doc_topic, _doc_term_matrix, model_choice):
+    """Fallback when no pre-built map exists. Underscore arguments are left out of
+    Streamlit's cache key because models and sparse matrices don't hash reliably."""
+    return build_topic_map_html(_model, feature_names, doc_topic, _doc_term_matrix)
+
+
+def get_topic_map_html(model_choice, model, feature_names, doc_topic, vectorizer, texts):
+    """Returns (html, source) where source is 'prebuilt' or 'live'."""
+    path = f"data/topic_map_{model_choice.lower()}.html"
+    if os.path.exists(path):
+        return read_prebuilt_map(path, os.path.getmtime(path)), "prebuilt"
+    html = build_topic_map_live(model, feature_names, doc_topic, vectorizer.transform(texts), model_choice)
+    return html, "live"
+
+
+@st.cache_data(show_spinner=False)
+def corpus_word_counts(_df, n=200):
+    """Most frequent cleaned words across the corpus. Cached once per session,
+    since the corpus doesn't change while the app runs."""
+    counts = _df["clean_text"].astype(str).str.split().explode().value_counts()
+    return counts.head(n)
+
+
+@st.cache_data(show_spinner=False)
+def corpus_summary(_df):
+    lengths = _df["clean_text"].astype(str).str.split().str.len()
+    vocab = _df["clean_text"].astype(str).str.split().explode().nunique()
+    return len(_df), float(lengths.mean()), int(vocab), lengths
 
 
 # --- Sidebar navigation ---
@@ -815,16 +1000,22 @@ df = load_data()
 if page == "Corpus Overview":
     page_header("Corpus Overview", "A first look at the complaint dataset before any modelling.")
 
+    n_docs, avg_words, vocab_size, lengths = corpus_summary(df)
+    word_counts = corpus_word_counts(df)
+
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total complaints", f"{len(df):,}")
-    col2.metric("Avg. words / complaint", f"{df['clean_text'].str.split().str.len().mean():.0f}")
-    col3.metric("Vocabulary size (approx.)", f"{len(set(' '.join(df['clean_text']).split())):,}")
+    col1.metric("Total complaints", f"{n_docs:,}")
+    col2.metric("Avg. words per complaint", f"{avg_words:.0f}")
+    col3.metric("Vocabulary size", f"{vocab_size:,}")
 
     st.subheader("Complaint length distribution")
     fig, ax = plt.subplots(figsize=(8, 3))
     themed_axes(fig, ax)
-    df["clean_text"].str.split().str.len().hist(bins=40, ax=ax, color=UI_TOPIC_COLORS[0])
-    ax.set_xlabel("Word count")
+    ax.hist(lengths, bins=40, color=UI_TOPIC_COLORS[0])
+    ax.axvline(lengths.median(), color=UI_TOPIC_COLORS[1], linestyle="--", linewidth=1.5)
+    ax.text(lengths.median(), ax.get_ylim()[1] * 0.92, f"  median {lengths.median():.0f} words",
+            color=UI_TOPIC_COLORS[1], fontsize=9)
+    ax.set_xlabel("Word count (after cleaning)")
     ax.set_ylabel("Number of complaints")
     ax.spines[["top", "right"]].set_visible(False)
     st.pyplot(fig)
@@ -832,19 +1023,20 @@ if page == "Corpus Overview":
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Top words in the cleaned corpus")
-        all_words = " ".join(df["clean_text"]).split()
-        top_words = pd.Series(all_words).value_counts().head(15)
+        top_words = word_counts.head(15)
         fig_w, ax_w = plt.subplots(figsize=(6, 4.2))
         themed_axes(fig_w, ax_w)
         ax_w.barh(top_words.index[::-1], top_words.values[::-1], color=UI_TOPIC_COLORS[1])
+        ax_w.set_xlabel("Occurrences")
         ax_w.spines[["top", "right"]].set_visible(False)
         st.pyplot(fig_w)
 
     with col_b:
         st.subheader("☁️ Word Cloud")
-        st.pyplot(render_wordcloud(
-            " ".join(df["clean_text"]), colormap=UI_TOPIC_COLORMAPS[2], bg_color=THEME["wc_bg"],
-        ))
+        st.image(wordcloud_png(
+            tuple((str(w), float(c)) for w, c in word_counts.items()),
+            UI_TOPIC_COLORS[2], THEME["wc_bg"],
+        ), width="stretch")
 
 # ============================================================
 # PAGE: Preprocessing Demo
@@ -865,7 +1057,7 @@ elif page == "Preprocessing Demo":
 # PAGE: Topic Explorer
 # ============================================================
 elif page == "Topic Explorer":
-    page_header("Topic Explorer", "Browse each discovered topic and its defining vocabulary.")
+    page_header("Topic Explorer", "Browse each discovered topic, its vocabulary, and the complaints behind it.")
 
     if not models_ready:
         st.warning("Run `python src/modeling.py` from the terminal first to train the models.")
@@ -873,88 +1065,209 @@ elif page == "Topic Explorer":
 
     tfidf_vectorizer, count_vectorizer, lda_model, nmf_model, lda_doc_topic, nmf_doc_topic = load_models()
 
-    model_choice = st.selectbox("Choose a model", ["LDA", "NMF"])
+    model_choice = st.selectbox(
+        "Choose a model", MODEL_OPTIONS, format_func=lambda m: MODEL_CAPTIONS[m], key="explorer_model",
+    )
 
     if model_choice == "LDA":
-        model, feature_names = lda_model, count_vectorizer.get_feature_names_out()
-        doc_topic = lda_doc_topic
+        model, vectorizer, doc_topic = lda_model, count_vectorizer, lda_doc_topic
     else:
-        model, feature_names = nmf_model, tfidf_vectorizer.get_feature_names_out()
-        doc_topic = nmf_doc_topic
+        model, vectorizer, doc_topic = nmf_model, tfidf_vectorizer, nmf_doc_topic
+    feature_names = vectorizer.get_feature_names_out()
 
     n_topics = model.components_.shape[0]
+    rows_match = doc_topic.shape[0] == len(df)
+    assignments = np.argmax(doc_topic, axis=1)
+    dist = pd.Series(assignments).value_counts().reindex(range(n_topics), fill_value=0)
+    total_docs = int(dist.sum())
 
-    with st.expander("✏️ Name Your Topics", expanded=False):
+    # ---------------- Name your topics ----------------
+    with st.expander(f"✏️ Name your {model_choice} topics", expanded=False):
         st.caption(
-            "Replace generic topic numbers with meaningful names once you've reviewed the "
-            "keywords below — these names carry through every chart, the PDF report, and the slide deck."
+            "Names apply everywhere in the app straight away, including the PDF and slide-deck "
+            "exports. To keep them for every visitor, save them to data/topic_labels.json and "
+            "commit that file to GitHub."
         )
         label_cols = st.columns(2)
         for i in range(n_topics):
-            col = label_cols[i % 2]
-            with col:
+            with label_cols[i % 2]:
                 new_label = st.text_input(
-                    f"Topic {i}", value=get_topic_label(i), key=f"label_input_{i}",
+                    f"Topic {i}", value=get_topic_label(i, model_choice),
+                    key=f"label_{model_choice}_{i}",
                 )
-                st.session_state["topic_labels"][i] = new_label
+                st.session_state["topic_labels"][model_choice][i] = new_label.strip() or f"Topic {i}"
 
-    st.subheader(f"{model_choice} — Topic Word Clouds")
-    st.caption("Word size reflects how strongly that word defines the topic.")
+        export = {}
+        for m in MODEL_OPTIONS:
+            n_m = (nmf_model if m == "NMF" else lda_model).components_.shape[0]
+            export[m] = {}
+            for i in range(n_m):
+                name = get_topic_label(i, m)
+                style = get_topic_style(i, m)
+                if name != f"Topic {i}" or style:
+                    export[m][str(i)] = {"name": name, **({"style": style} if style else {})}
+        export_json = json.dumps(export, indent=2)
 
-    # Two topics per row, each with its own color-coded word cloud
-    for row_start in range(0, n_topics, 2):
-        cols = st.columns(2)
-        for offset, col in enumerate(cols):
-            topic_idx = row_start + offset
-            if topic_idx >= n_topics:
-                continue
-            topic_weights = model.components_[topic_idx]
-            top_indices = topic_weights.argsort()[:-31:-1]
-            freq = {feature_names[i]: float(topic_weights[i]) for i in top_indices}
-            color = UI_TOPIC_COLORS[topic_idx % len(UI_TOPIC_COLORS)]
-            colormap = UI_TOPIC_COLORMAPS[topic_idx % len(UI_TOPIC_COLORMAPS)]
-            with col:
+        save_col, dl_col = st.columns(2)
+        with save_col:
+            if st.button("💾 Save names to data/topic_labels.json", width="stretch"):
+                try:
+                    with open(LABELS_PATH, "w", encoding="utf-8") as f:
+                        f.write(export_json)
+                    st.success("Saved. Commit data/topic_labels.json to keep these names on the deployed app.")
+                except OSError as err:
+                    st.error(f"Couldn't write the file ({err}). Use the download button instead.")
+        with dl_col:
+            st.download_button(
+                "⬇️ Download names (JSON)", data=export_json, file_name="topic_labels.json",
+                mime="application/json", width="stretch",
+            )
+
+    tab_overview, tab_deep, tab_clouds, tab_map = st.tabs(
+        ["📊 Overview", "🔎 Topic deep dive", "☁️ Word clouds", "🗺️ Topic map"]
+    )
+
+    # ---------------- Overview ----------------
+    with tab_overview:
+        st.info(generate_executive_summary(dist, total_docs, model_choice))
+
+        st.subheader("Complaints per topic")
+        st.caption("Each complaint is counted under the topic it scores highest on.")
+        st.pyplot(topic_distribution_chart(dist, model_choice, total_docs))
+
+        dist_df = distribution_table(dist, model_choice, total_docs)
+        st.download_button(
+            "⬇️ Download topic distribution (CSV)",
+            data=dist_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"topic_distribution_{model_choice.lower()}.csv",
+            mime="text/csv",
+        )
+
+        styled = [s for s in (get_topic_style(i, model_choice) for i in range(n_topics)) if s]
+        if styled:
+            st.subheader("How complaints are written")
+            st.caption(
+                "Some topics group complaints by the issue raised. Others group them by writing "
+                "style: formal dispute-letter templates versus first-person accounts."
+            )
+            style_counts = {}
+            for i in range(n_topics):
+                s = get_topic_style(i, model_choice)
+                if s:
+                    style_counts[s] = style_counts.get(s, 0) + int(dist[i])
+            style_cols = st.columns(len(style_counts))
+            for col, (s, count) in zip(style_cols, sorted(style_counts.items(), key=lambda kv: -kv[1])):
+                with col:
+                    st.markdown(style_badge(s), unsafe_allow_html=True)
+                    st.metric(s, f"{count / total_docs:.0%}", f"{count:,} complaints", delta_color="off",
+                              label_visibility="collapsed")
+
+    # ---------------- Topic deep dive ----------------
+    with tab_deep:
+        order_by_size = dist.sort_values(ascending=False).index.tolist()
+        option_labels = {i: f"{i}. {get_topic_label(i, model_choice)}  ({dist[i]:,} complaints)"
+                         for i in order_by_size}
+        chosen = st.selectbox(
+            "Pick a topic",
+            order_by_size,
+            format_func=option_labels.get,
+            key=f"deep_topic_{model_choice}",
+        )
+        color = UI_TOPIC_COLORS[chosen % len(UI_TOPIC_COLORS)]
+        rank = order_by_size.index(chosen) + 1
+
+        st.markdown(
+            f"<div class='topic-title' style='color:{color};'>Topic {chosen}: "
+            f"{get_topic_label(chosen, model_choice)}</div>"
+            f"{style_badge(get_topic_style(chosen, model_choice))}",
+            unsafe_allow_html=True,
+        )
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Complaints", f"{dist[chosen]:,}")
+        m2.metric("Share of corpus", f"{dist[chosen] / total_docs:.1%}" if total_docs else "-")
+        m3.metric("Size rank", f"{rank} of {n_topics}")
+
+        terms = topic_top_terms(model, feature_names, chosen, n=30)
+        left, right = st.columns([1, 1])
+        with left:
+            st.markdown("**Top terms by weight**")
+            top12 = terms[:12][::-1]
+            fig_t, ax_t = plt.subplots(figsize=(6, 4.6))
+            themed_axes(fig_t, ax_t)
+            ax_t.barh([w for w, _ in top12], [v for _, v in top12], color=color)
+            ax_t.set_xlabel("Weight in topic")
+            ax_t.spines[["top", "right"]].set_visible(False)
+            fig_t.tight_layout()
+            st.pyplot(fig_t)
+        with right:
+            st.markdown("**Word cloud**")
+            st.image(wordcloud_png(terms, color, THEME["wc_bg"], width=800, height=620), width="stretch")
+
+        st.markdown("**Most representative complaints**")
+        if not rows_match:
+            st.caption(
+                f"Complaint examples are unavailable: the saved model has {doc_topic.shape[0]:,} rows "
+                f"but the corpus has {len(df):,}. Re-run modeling.py so they match."
+            )
+        else:
+            text_col = "raw_text" if "raw_text" in df.columns else "clean_text"
+            weights = doc_topic[:, chosen]
+            row_totals = doc_topic.sum(axis=1)
+            candidates = np.argsort(weights)[::-1][:3]
+            st.caption("The three complaints that score highest on this topic, with personal details redacted by the CFPB.")
+            for n, d in enumerate(candidates, start=1):
+                share = weights[d] / row_totals[d] if row_totals[d] > 0 else 0
+                text = clean_redactions(df.iloc[d][text_col])
+                shown = text if len(text) <= 700 else text[:700].rsplit(" ", 1)[0] + " …"
                 st.markdown(
-                    f"<h4 style='color:{color}; margin-bottom:0.2rem;'>{get_topic_label(topic_idx)}</h4>",
+                    f"<div class='complaint-quote'><div class='complaint-meta'>Example {n}: "
+                    f"{share:.0%} of this complaint's topic weight falls on this topic</div>{shown}</div>",
                     unsafe_allow_html=True,
                 )
-                st.pyplot(render_wordcloud(freq, colormap=colormap, bg_color=THEME["wc_bg"]))
-                top5 = sorted(freq, key=freq.get, reverse=True)[:5]
-                st.caption(", ".join(top5))
 
-    st.subheader("Documents per topic")
-    assignments = np.argmax(doc_topic, axis=1)
-    dist = pd.Series(assignments).value_counts().sort_index()
-    fig_d, ax_d = plt.subplots(figsize=(8, 3.2))
-    themed_axes(fig_d, ax_d)
-    bar_colors = [UI_TOPIC_COLORS[i % len(UI_TOPIC_COLORS)] for i in dist.index]
-    ax_d.bar([get_topic_label(i) for i in dist.index], dist.values, color=bar_colors)
-    ax_d.set_ylabel("Documents")
-    plt.setp(ax_d.get_xticklabels(), rotation=25, ha="right")
-    ax_d.spines[["top", "right"]].set_visible(False)
-    st.pyplot(fig_d)
+    # ---------------- Word clouds ----------------
+    with tab_clouds:
+        st.caption("Word size reflects how strongly that word defines the topic.")
+        for row_start in range(0, n_topics, 3):
+            cols = st.columns(3)
+            for offset, col in enumerate(cols):
+                topic_idx = row_start + offset
+                if topic_idx >= n_topics:
+                    continue
+                t_color = UI_TOPIC_COLORS[topic_idx % len(UI_TOPIC_COLORS)]
+                t_terms = topic_top_terms(model, feature_names, topic_idx, n=30)
+                with col:
+                    st.markdown(
+                        f"<div class='cloud-title' style='color:{t_color};'>{topic_idx}. "
+                        f"{get_topic_label(topic_idx, model_choice)}</div>",
+                        unsafe_allow_html=True,
+                    )
+                    st.image(wordcloud_png(t_terms, t_color, THEME["wc_bg"], width=700, height=420), width="stretch")
+                    st.caption(", ".join(w for w, _ in t_terms[:5]))
 
-    st.info(generate_executive_summary(dist, len(df), model_choice))
-
-    st.subheader("🗺️ Interactive Topic Map")
-    st.caption(
-        "Bubble size shows how prevalent a topic is; bubble distance shows how related topics "
-        "are to each other. Click a bubble to see its top terms, or hover over a bar to see "
-        "which topics use that term most."
-    )
-    try:
-        with st.spinner("Building interactive map (this can take a few seconds)..."):
-            source_matrix = count_vectorizer.transform(df["clean_text"]) if model_choice == "LDA" \
-                else tfidf_vectorizer.transform(df["clean_text"])
-            vis_html = build_pyldavis_html(model, feature_names, doc_topic, source_matrix, model_choice)
-        st.iframe(vis_html, height=800)
-    except Exception:
-        st.info(
-            "The interactive map couldn't be generated for this model/topic count combination "
-            "(a numerical edge case in the underlying visualization library). The word clouds "
-            "and keyword lists above still fully represent each topic - try switching between "
-            "LDA and NMF, as the issue is often specific to one model's output."
+    # ---------------- Topic map ----------------
+    with tab_map:
+        st.caption(
+            "Bubble size shows how common a topic is; distance shows how related topics are. "
+            "Click a bubble to see its top terms. Bubble numbers match the topic numbers used in this app."
         )
+        legend = ", ".join(f"{i} = {get_topic_label(i, model_choice)}" for i in range(n_topics))
+        st.caption(f"Key: {legend}")
+        try:
+            with st.spinner("Loading the interactive map..."):
+                vis_html, source = get_topic_map_html(
+                    model_choice, model, feature_names, doc_topic, vectorizer, df["clean_text"].astype(str),
+                )
+            st.iframe(vis_html, height=700)
+            if source == "live":
+                st.caption("Built live. Run `python src/build_topic_maps.py` to pre-build it for faster loading.")
+        except Exception:
+            st.info(
+                "The interactive map couldn't be generated for this model. The overview, deep dive "
+                "and word clouds still show every topic in full. Try switching model, or run "
+                "`python src/build_topic_maps.py` locally and commit the saved map."
+            )
 
 # ============================================================
 # PAGE: Model Comparison
@@ -1019,30 +1332,77 @@ elif page == "Model Comparison":
 # PAGE: Try It Yourself
 # ============================================================
 elif page == "Try It Yourself":
-    page_header("Try It Yourself", "Paste a new complaint and see which topic it's assigned to.")
+    page_header("Try It Yourself", "Paste a complaint, or pick an example, and see which topics it belongs to.")
 
     if not models_ready:
         st.warning("Run `python src/modeling.py` from the terminal first to train the models.")
         st.stop()
 
     tfidf_vectorizer, count_vectorizer, lda_model, nmf_model, lda_doc_topic, nmf_doc_topic = load_models()
-    model_choice = st.selectbox("Model", ["LDA", "NMF"])
 
-    user_text = st.text_area("Paste a complaint here", height=150)
-    if st.button("Classify Topic") and user_text.strip():
+    TRY_EXAMPLES = {
+        "Repeated calls": "They call me five or six times a day about a debt, including at work, even after I told them in writing to stop calling.",
+        "Identity theft": "There is a collection account on my credit report that I never opened. I believe I am a victim of identity theft and I filed a police report.",
+        "Validation request": "I sent a letter asking the collector to validate this alleged debt and provide proof from the original creditor, but they never responded and keep reporting it.",
+    }
+
+    def use_example(text):
+        st.session_state["try_text"] = text
+
+    st.session_state.setdefault("try_text", "")
+    st.caption("Try an example:")
+    ex_cols = st.columns(len(TRY_EXAMPLES))
+    for col, (label, text) in zip(ex_cols, TRY_EXAMPLES.items()):
+        col.button(label, on_click=use_example, args=(text,), width="stretch", key=f"ex_{label}")
+
+    user_text = st.text_area("Complaint text", key="try_text", height=150,
+                             placeholder="Describe a debt collection problem in a few sentences...")
+    model_choice = st.selectbox("Model", MODEL_OPTIONS, format_func=lambda m: MODEL_CAPTIONS[m], key="try_model")
+
+    if st.button("Classify complaint", type="primary") and user_text.strip():
         cleaned = preprocess_text(user_text)
         if model_choice == "LDA":
-            vec = count_vectorizer.transform([cleaned])
-            topic_dist = lda_model.transform(vec)[0]
-            topics = get_top_words(lda_model, count_vectorizer.get_feature_names_out())
+            model, vectorizer = lda_model, count_vectorizer
         else:
-            vec = tfidf_vectorizer.transform([cleaned])
-            topic_dist = nmf_model.transform(vec)[0]
-            topics = get_top_words(nmf_model, tfidf_vectorizer.get_feature_names_out())
+            model, vectorizer = nmf_model, tfidf_vectorizer
 
-        best_topic = int(np.argmax(topic_dist))
-        st.success(f"Assigned to **{get_topic_label(best_topic)}** (confidence: {topic_dist[best_topic]:.2f})")
-        st.write(f"Top words: {', '.join(topics[best_topic])}")
+        vec = vectorizer.transform([cleaned])
+        if vec.nnz == 0:
+            st.warning(
+                "None of the words in this text appear in the model's vocabulary, so it can't be "
+                "placed in a topic. Try a longer complaint that describes the problem."
+            )
+            st.stop()
+
+        raw_scores = model.transform(vec)[0]
+        total = raw_scores.sum()
+        shares = raw_scores / total if total > 0 else raw_scores
+        ranked = np.argsort(shares)[::-1][:3]
+        feature_names = vectorizer.get_feature_names_out()
+
+        best = int(ranked[0])
+        best_color = UI_TOPIC_COLORS[best % len(UI_TOPIC_COLORS)]
+        st.markdown(
+            f"<div class='topic-title' style='color:{best_color};'>Best match: Topic {best}, "
+            f"{get_topic_label(best, model_choice)}</div>"
+            f"{style_badge(get_topic_style(best, model_choice))}",
+            unsafe_allow_html=True,
+        )
+        st.caption("Top terms for this topic: " + ", ".join(w for w, _ in topic_top_terms(model, feature_names, best, n=8)))
+
+        st.subheader("Topic breakdown")
+        for idx in ranked:
+            idx = int(idx)
+            st.progress(
+                float(min(max(shares[idx], 0.0), 1.0)),
+                text=f"{idx}. {get_topic_label(idx, model_choice)}: {shares[idx]:.0%}",
+            )
+
+        vocab = set(feature_names)
+        matched = [w for w in cleaned.split() if w in vocab]
+        if matched:
+            with st.expander("Words the model recognised"):
+                st.write(", ".join(dict.fromkeys(matched)))
 
 # ============================================================
 # PAGE: Analyze & Report
@@ -1066,9 +1426,11 @@ elif page == "Analyze & Report":
             topic_dist = lda_model.transform(vecs)
 
         assignments = np.argmax(topic_dist, axis=1)
+        row_sums = topic_dist.sum(axis=1)
+        shares = np.divide(topic_dist, row_sums[:, None], out=np.zeros_like(topic_dist), where=row_sums[:, None] > 0)
         result_df = base_df.copy()
-        result_df["assigned_topic"] = [get_topic_label(i) for i in assignments]
-        result_df["confidence"] = topic_dist[np.arange(len(assignments)), assignments].round(3)
+        result_df["assigned_topic"] = [get_topic_label(i, model_choice) for i in assignments]
+        result_df["confidence"] = shares[np.arange(len(assignments)), assignments].round(3)
 
         st.session_state["upload_analysis"] = {
             "df": result_df,
@@ -1091,7 +1453,8 @@ elif page == "Analyze & Report":
         st.markdown("<div style='height: 1.8rem'></div>", unsafe_allow_html=True)
         sample_clicked = st.button("🔁 Try a Sample", width="stretch")
 
-    model_choice = st.selectbox("Model to use for topic assignment", ["NMF", "LDA"], key="upload_model_choice")
+    model_choice = st.selectbox("Model to use for topic assignment", MODEL_OPTIONS,
+                                format_func=lambda m: MODEL_CAPTIONS[m], key="upload_model_choice")
 
     if sample_clicked:
         with st.spinner("Running the sample through the topic model..."):
@@ -1134,17 +1497,26 @@ elif page == "Analyze & Report":
         st.info(generate_executive_summary(dist, len(result_df), model_choice))
 
         st.subheader("Topic distribution for this file")
-        fig_u, ax_u = plt.subplots(figsize=(8, 3.2))
-        themed_axes(fig_u, ax_u)
-        bar_colors = [UI_TOPIC_COLORS[i % len(UI_TOPIC_COLORS)] for i in dist.index]
-        ax_u.bar([get_topic_label(i) for i in dist.index], dist.values, color=bar_colors)
-        ax_u.set_ylabel("Documents")
-        plt.setp(ax_u.get_xticklabels(), rotation=25, ha="right")
-        ax_u.spines[["top", "right"]].set_visible(False)
-        st.pyplot(fig_u)
+        st.pyplot(topic_distribution_chart(dist, model_choice, len(result_df)))
 
-        st.subheader("Sample assignments")
-        st.dataframe(result_df.head(20), width="stretch")
+        st.subheader("Assignments")
+        st.dataframe(
+            result_df,
+            width="stretch",
+            height=min(420, 38 + 35 * len(result_df)),
+            column_config={
+                "confidence": st.column_config.ProgressColumn(
+                    "confidence", help="Share of the complaint's topic weight on its assigned topic",
+                    min_value=0.0, max_value=1.0, format="%.2f",
+                ),
+            },
+        )
+        st.download_button(
+            "⬇️ Download all assignments (CSV)",
+            data=result_df.to_csv(index=False).encode("utf-8"),
+            file_name="topic_assignments.csv",
+            mime="text/csv",
+        )
 
         st.subheader("Download report")
         st.caption("Both formats include the same distribution chart, executive summary, and topic keywords.")
