@@ -84,44 +84,97 @@ TOPIC_COLORMAPS = [
     LinearSegmentedColormap.from_list("t", ["#FFFFFF", c]) for c in TOPIC_COLORS
 ]
 
-# --- Two in-app themes, both built from the same 5 brand colors. Only affects the live UI. ---
+# ------------------------------------------------------------------------------
+# Colour contrast helpers (WCAG 2.1). Used to guarantee readable text: any
+# colour used for text is nudged darker or lighter until it clears the minimum
+# contrast ratio against the background it sits on.
+# ------------------------------------------------------------------------------
+def _rgb(hex_color):
+    h = hex_color.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _luminance(hex_color):
+    def channel(v):
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (channel(v) for v in _rgb(hex_color))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(a, b):
+    la, lb = _luminance(a), _luminance(b)
+    return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+
+
+def _mix(a, b, amount):
+    ra, rb = _rgb(a), _rgb(b)
+    return "#{:02x}{:02x}{:02x}".format(*(round(x + (y - x) * amount) for x, y in zip(ra, rb)))
+
+
+def readable_on(color, background, min_ratio=4.5):
+    """Returns `color`, darkened (on light backgrounds) or lightened (on dark ones)
+    just enough to reach `min_ratio` contrast against `background`."""
+    target = "#000000" if _luminance(background) > 0.18 else "#ffffff"
+    step = 0.0
+    candidate = color
+    while contrast_ratio(candidate, background) < min_ratio and step < 1.0:
+        step += 0.04
+        candidate = _mix(color, target, step)
+    return candidate
+
+
+# ------------------------------------------------------------------------------
+# Themes. Day = "Clear Sky" (cool off-white, white cards, deep navy text).
+# Night = "Midnight" (deep navy surfaces, soft white text, sky-blue accent).
+# Both built from the brand palette: navy #1b3865, sky #45c8f3, orange #f47a21.
+# Only affects the live UI; PDF/PPTX exports always use the fixed brand look.
+# ------------------------------------------------------------------------------
 THEMES = {
     "Day": {
-        "app_bg": "#fdf6ec",
-        "sidebar_bg": "#faeee0",
-        "card_bg": "#faeee0",
-        "card_border": "#f0ddc4",
-        "text": "#1b3865",
-        "text_secondary": "#8a6a45",
-        "header_grad": "linear-gradient(135deg, #f47a21 0%, #e0601a 55%, #1b3865 130%)",
-        "brand_icon_grad": "linear-gradient(135deg, #f47a21 0%, #1b3865 100%)",
-        "nav_selected_bg": "#f47a21",
-        "nav_selected_text": "#FFFFFF",
-        "nav_hover_bg": "#f7e3cf",
-        "wc_bg": "#fdf6ec",
-        "grid_color": "#ecdcc4",
+        "app_bg": "#f4f7fb",
+        "sidebar_bg": "#ffffff",
+        "card_bg": "#ffffff",
+        "card_border": "#dbe3ee",
+        "input_bg": "#ffffff",
+        "input_border": "#c3cfdf",
+        "code_bg": "#eef2f8",
+        "text": "#14213d",
+        "text_secondary": "#4a5870",
+        "header_grad": "linear-gradient(120deg, #14213d 0%, #1b3865 50%, #1f5f94 100%)",
+        "brand_icon_grad": "linear-gradient(135deg, #1b3865 0%, #2a7ab8 100%)",
+        "accent": "#1b3865",          # selected nav, selected tab, primary buttons
+        "accent_text": "#ffffff",
+        "accent_soft": "#e8eef7",     # hover states
+        "highlight": "#f47a21",       # decorative borders only, never text
+        "wc_bg": "#ffffff",
+        "grid_color": "#e3e9f2",
         "topic_colors": [
-            "#f47a21", "#1b3865", "#45c8f3", "#e0601a", "#5c7ba3",
-            "#ffb877", "#0f2540", "#8fdcf7", "#c25e14", "#2f95b8", "#a4b8cd",
+            "#1b3865", "#f47a21", "#2a9fd6", "#5c7ba3", "#e0892f",
+            "#45c8f3", "#0f2540", "#c25e14", "#2f95b8", "#8aa1bd", "#5e5e5f",
         ],
     },
     "Night": {
-        "app_bg": "#0d1826",
-        "sidebar_bg": "#111f33",
-        "card_bg": "#16283f",
-        "card_border": "#26405f",
-        "text": "#f2f5fa",
-        "text_secondary": "#c3cedf",
-        "header_grad": "linear-gradient(135deg, #0d1826 0%, #1b3865 55%, #45c8f3 130%)",
-        "brand_icon_grad": "linear-gradient(135deg, #0d1826 0%, #45c8f3 100%)",
-        "nav_selected_bg": "#45c8f3",
-        "nav_selected_text": "#0d1826",
-        "nav_hover_bg": "#1f3654",
-        "wc_bg": "#16283f",
-        "grid_color": "#2c4463",
+        "app_bg": "#0b1626",
+        "sidebar_bg": "#0f1d31",
+        "card_bg": "#132640",
+        "card_border": "#25406a",
+        "input_bg": "#0f2036",
+        "input_border": "#3a5782",
+        "code_bg": "#0f2036",
+        "text": "#eef3fa",
+        "text_secondary": "#b9c7da",
+        "header_grad": "linear-gradient(120deg, #0b1626 0%, #1b3865 55%, #1f5f94 100%)",
+        "brand_icon_grad": "linear-gradient(135deg, #1b3865 0%, #45c8f3 100%)",
+        "accent": "#45c8f3",
+        "accent_text": "#0b1626",
+        "accent_soft": "#1a3150",
+        "highlight": "#f47a21",
+        "wc_bg": "#132640",
+        "grid_color": "#25406a",
         "topic_colors": [
-            "#45c8f3", "#f47a21", "#8fdcf7", "#f4a35c", "#5c9fd6",
-            "#ffb877", "#2f95b8", "#ffd1a3", "#a9c9e8", "#c25e14", "#dbe4f0",
+            "#45c8f3", "#f47a21", "#8fdcf7", "#f4a35c", "#7fa6d6",
+            "#ffc38a", "#5fb4d4", "#ffd1a3", "#a9c9e8", "#e8894a", "#dbe4f0",
         ],
     },
 }
@@ -140,296 +193,228 @@ with st.sidebar:
 
 selected_theme = st.session_state["app_theme"]
 THEME = THEMES[selected_theme]
-UI_TOPIC_COLORS = THEME["topic_colors"]
-UI_TOPIC_COLORMAPS = [
-    LinearSegmentedColormap.from_list("t", [THEME["wc_bg"], c]) for c in UI_TOPIC_COLORS
-]
+UI_TOPIC_COLORS = THEME["topic_colors"]                     # fills: bars, word clouds
+UI_TOPIC_TEXT = [readable_on(c, THEME["app_bg"]) for c in UI_TOPIC_COLORS]  # topic names as text
+T = THEME  # short alias for the stylesheet below
 
-# --- Global CSS: typography, header banner, card-style metrics - all theme-driven ---
+# --- Global CSS -----------------------------------------------------------------
+# Every rule that sets a text colour also sets (or relies on) a background from the
+# same theme, so light-on-light or dark-on-dark can't happen. Streamlit's own
+# widgets (buttons, inputs, dropdowns, code, expanders, uploader, toolbar) are
+# styled explicitly, because they otherwise keep light-mode backgrounds in Night.
 st.markdown(
     f"""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
-    html, body, [class*="css"] {{
-        font-family: 'Inter', sans-serif;
-    }}
+    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif; }}
 
-    .stApp {{
-        background-color: {THEME["app_bg"]};
-    }}
-    .stApp, .stApp p, .stApp li, .stApp span, .stApp label {{
-        color: {THEME["text"]};
-    }}
-
-    /* Streamlit's own widgets (labels, captions, expanders, file uploader) use
-       data-testid attributes rather than semantic tags, so the broad rule above
-       doesn't reach them - covered explicitly here. */
-    .stApp [data-testid="stWidgetLabel"] p,
+    /* ---------- Base surfaces and text ---------- */
+    .stApp {{ background-color: {T["app_bg"]}; color: {T["text"]}; }}
+    .stApp p, .stApp li, .stApp span, .stApp label, .stApp h1, .stApp h2,
+    .stApp h3, .stApp h4, .stApp h5, .stApp h6 {{ color: {T["text"]}; }}
     .stApp [data-testid="stMarkdownContainer"] p,
     .stApp [data-testid="stMarkdownContainer"] li,
-    .stApp [data-testid="stMarkdownContainer"] strong {{
-        color: {THEME["text"]} !important;
-    }}
+    .stApp [data-testid="stMarkdownContainer"] strong,
+    .stApp [data-testid="stWidgetLabel"] p {{ color: {T["text"]} !important; }}
+    h2, h3, h4 {{ font-weight: 700; }}
+    .stApp hr {{ border-color: {T["card_border"]} !important; }}
+
+    /* Streamlit draws captions at reduced opacity; restore full strength */
     .stApp [data-testid="stCaptionContainer"],
-    .stApp [data-testid="stCaptionContainer"] p {{
-        color: {THEME["text_secondary"]} !important;
-    }}
-    .stApp [data-testid="stExpander"] {{
-        background-color: {THEME["card_bg"]};
-        border: 1px solid {THEME["card_border"]};
-        border-radius: 10px;
-    }}
-    .stApp [data-testid="stExpander"] summary p,
-    .stApp [data-testid="stExpander"] summary span {{
-        color: {THEME["text"]} !important;
-    }}
-    .stApp [data-testid="stFileUploaderDropzone"] {{
-        background-color: {THEME["card_bg"]};
-        border: 1px solid {THEME["card_border"]};
-    }}
-    .stApp [data-testid="stFileUploaderDropzone"] div,
-    .stApp [data-testid="stFileUploaderDropzone"] span,
-    .stApp [data-testid="stFileUploaderDropzoneInstructions"] div,
-    .stApp [data-testid="stFileUploaderDropzoneInstructions"] span {{
-        color: {THEME["text_secondary"]} !important;
-    }}
-    .stApp [data-testid="stFileUploaderFile"] span,
-    .stApp [data-testid="stFileUploaderFileName"] {{
-        color: {THEME["text"]} !important;
-    }}
-    .stApp [data-testid="stDataFrame"] {{
-        border: 1px solid {THEME["card_border"]};
-        border-radius: 8px;
-    }}
-    .stApp [data-testid="stTable"] table,
-    .stApp [data-testid="stTable"] th,
-    .stApp [data-testid="stTable"] td {{
-        color: {THEME["text"]} !important;
-        background-color: {THEME["card_bg"]} !important;
-        border-color: {THEME["card_border"]} !important;
-    }}
-    .stApp [data-testid="stAlertContentInfo"],
-    .stApp [data-testid="stAlertContentInfo"] p,
-    .stApp [data-testid="stAlertContentSuccess"],
-    .stApp [data-testid="stAlertContentSuccess"] p,
-    .stApp [data-testid="stAlertContentWarning"],
-    .stApp [data-testid="stAlertContentWarning"] p,
-    .stApp [data-testid="stAlertContentError"],
-    .stApp [data-testid="stAlertContentError"] p {{
-        color: #1b3865 !important;
-    }}
-    .stApp hr {{
-        border-color: {THEME["card_border"]} !important;
-    }}
-    .stApp [data-testid="stTextInput"] input,
-    .stApp [data-testid="stSelectbox"] div[data-baseweb="select"] {{
-        color: #1b3865 !important;
+    .stApp [data-testid="stCaptionContainer"] * {{
+        color: {T["text_secondary"]} !important; opacity: 1 !important;
     }}
 
-    .app-header {{
-        padding: 1.75rem 2rem;
-        border-radius: 12px;
-        background: {THEME["header_grad"]};
-        color: white;
-        margin-bottom: 1.5rem;
-    }}
-    .app-header h1 {{
-        margin: 0;
-        font-size: 1.9rem;
-        font-weight: 700;
-        color: white;
-    }}
-    .app-header p {{
-        margin: 0.25rem 0 0 0;
-        font-size: 0.95rem;
-        opacity: 0.92;
-        color: white;
-    }}
-    /* Wins over the stMarkdownContainer text-color fix below, since the header
-       is rendered via st.markdown too and would otherwise inherit the theme's
-       body text color instead of staying white-on-gradient. */
-    .stApp [data-testid="stMarkdownContainer"] .app-header h1,
-    .stApp [data-testid="stMarkdownContainer"] .app-header p {{
-        color: #FFFFFF !important;
-        opacity: 0.92;
-    }}
-    .stApp [data-testid="stMarkdownContainer"] .app-header h1 {{
-        opacity: 1;
+    /* Top toolbar (Deploy / menu) */
+    .stApp header[data-testid="stHeader"] {{ background: {T["app_bg"]} !important; }}
+    .stApp header[data-testid="stHeader"] button,
+    .stApp header[data-testid="stHeader"] button * {{
+        color: {T["text"]} !important; background-color: transparent !important;
     }}
 
-    div[data-testid="stMetric"] {{
-        background-color: {THEME["card_bg"]};
-        border: 1px solid {THEME["card_border"]};
-        border-left: 3px solid {THEME["nav_selected_bg"]};
-        border-radius: 10px;
-        padding: 0.9rem 1rem;
-    }}
-    div[data-testid="stMetric"] label {{
-        color: {THEME["text_secondary"]} !important;
-    }}
-    div[data-testid="stMetricValue"] {{
-        color: {THEME["text"]} !important;
-    }}
-
-    h2, h3, h4 {{
-        color: {THEME["text"]};
-        font-weight: 700;
-    }}
-
+    /* ---------- Sidebar ---------- */
     section[data-testid="stSidebar"] {{
-        background-color: {THEME["sidebar_bg"]};
-        border-right: 1px solid {THEME["card_border"]};
+        background-color: {T["sidebar_bg"]};
+        border-right: 1px solid {T["card_border"]};
     }}
-
-    .sidebar-brand {{
-        display: flex;
-        align-items: center;
-        gap: 0.65rem;
-        margin: 0.25rem 0 1.5rem 0;
-    }}
+    section[data-testid="stSidebar"] [data-testid="stIconMaterial"] {{ color: {T["text"]} !important; }}
+    .sidebar-brand {{ display: flex; align-items: center; gap: 0.65rem; margin: 0.25rem 0 1.5rem 0; }}
     .sidebar-brand-icon {{
-        width: 42px;
-        height: 42px;
-        border-radius: 11px;
-        background: {THEME["brand_icon_grad"]};
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 1.35rem;
-        flex-shrink: 0;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+        width: 42px; height: 42px; border-radius: 11px; background: {T["brand_icon_grad"]};
+        display: flex; align-items: center; justify-content: center; font-size: 1.35rem;
+        flex-shrink: 0; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
     }}
-    .sidebar-brand-text {{
-        font-weight: 700;
-        font-size: 1rem;
-        line-height: 1.25;
-        color: {THEME["text"]};
-    }}
+    .sidebar-brand-text {{ font-weight: 700; font-size: 1rem; line-height: 1.25; color: {T["text"]}; }}
     .sidebar-brand-text small {{
-        display: block;
-        font-weight: 400;
-        font-size: 0.72rem;
-        color: {THEME["text_secondary"]};
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
+        display: block; font-weight: 500; font-size: 0.72rem; color: {T["text_secondary"]} !important;
+        letter-spacing: 0.03em; text-transform: uppercase;
     }}
-
-    section[data-testid="stSidebar"] div[role="radiogroup"] {{
-        gap: 0.25rem;
-    }}
+    section[data-testid="stSidebar"] div[role="radiogroup"] {{ gap: 0.25rem; }}
     section[data-testid="stSidebar"] div[role="radiogroup"] label {{
-        padding: 0.6rem 0.85rem;
-        border-radius: 8px;
-        width: 100%;
-        transition: background-color 0.15s ease;
+        padding: 0.6rem 0.85rem; border-radius: 8px; width: 100%; transition: background-color 0.15s ease;
     }}
     section[data-testid="stSidebar"] div[role="radiogroup"] label p {{
-        font-size: 1.02rem;
-        color: {THEME["text"]};
+        font-size: 1.02rem; color: {T["text"]} !important;
     }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{
-        background-color: {THEME["nav_hover_bg"]};
-    }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {{
-        background-color: {THEME["nav_selected_bg"]};
-    }}
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background-color: {T["accent_soft"]}; }}
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {{ background-color: {T["accent"]}; }}
     section[data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p {{
-        color: {THEME["nav_selected_text"]} !important;
-        font-weight: 600;
+        color: {T["accent_text"]} !important; font-weight: 600;
     }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] svg {{
-        display: none;
-    }}
-
-    .pipeline-step {{
-        background-color: {THEME["card_bg"]} !important;
-        border-left: 4px solid {THEME["nav_selected_bg"]} !important;
-    }}
-    .pipeline-step-title {{
-        color: {THEME["text"]} !important;
-    }}
-    .pipeline-step-desc {{
-        color: {THEME["text_secondary"]} !important;
-    }}
-
-    /* Banner text is always white, whatever the theme's global text colour */
-    .stApp .app-header, .stApp .app-header * {{
-        color: #FFFFFF !important;
-    }}
-    .app-header-title {{
-        font-size: 1.9rem;
-        font-weight: 700;
-        line-height: 1.2;
-        margin: 0;
-    }}
-    .app-header-subtitle {{
-        font-size: 0.98rem;
-        opacity: 0.92;
-        margin-top: 0.35rem;
-    }}
-
-    /* Hide the round radio dot in the sidebar nav; the pill highlight shows the selection.
-       :not(:has(p)) guarantees the element holding the page name is never hidden, whatever
-       Streamlit version is installed. */
+    section[data-testid="stSidebar"] div[role="radiogroup"] svg {{ display: none; }}
+    /* Hide the round radio dot; :not(:has(p)) guarantees a page name is never hidden */
     section[data-testid="stSidebar"] div[role="radiogroup"] label > div > div:first-child:not([data-testid]):not(:has(p)) {{
         display: none;
     }}
 
-    .cloud-title {{
-        font-size: 1.05rem;
-        font-weight: 700;
-        margin: 0.4rem 0 0.2rem 0;
-        line-height: 1.3;
+    /* ---------- Page banner (always white text on a dark gradient) ---------- */
+    .app-header {{
+        padding: 1.75rem 2rem; border-radius: 14px; background: {T["header_grad"]};
+        margin-bottom: 1.5rem; box-shadow: 0 6px 18px rgba(20, 33, 61, 0.18);
+    }}
+    .stApp .app-header, .stApp .app-header * {{ color: #FFFFFF !important; }}
+    .app-header-title {{ font-size: 1.9rem; font-weight: 700; line-height: 1.2; margin: 0; }}
+    .app-header-subtitle {{ font-size: 0.98rem; opacity: 0.95; margin-top: 0.35rem; }}
+
+    /* ---------- Buttons ---------- */
+    .stApp button[data-testid^="stBaseButton-secondary"],
+    .stApp [data-testid="stDownloadButton"] button,
+    .stApp [data-testid="stFileUploaderDropzone"] button {{
+        background-color: {T["card_bg"]} !important; color: {T["text"]} !important;
+        border: 1px solid {T["input_border"]} !important; border-radius: 8px !important;
+    }}
+    .stApp button[data-testid^="stBaseButton-secondary"] *,
+    .stApp [data-testid="stDownloadButton"] button *,
+    .stApp [data-testid="stFileUploaderDropzone"] button * {{ color: {T["text"]} !important; }}
+    .stApp button[data-testid^="stBaseButton-secondary"]:hover,
+    .stApp [data-testid="stDownloadButton"] button:hover,
+    .stApp [data-testid="stFileUploaderDropzone"] button:hover {{
+        background-color: {T["accent_soft"]} !important; border-color: {T["accent"]} !important;
+    }}
+    .stApp button[data-testid^="stBaseButton-primary"] {{
+        background-color: {T["accent"]} !important; border: 1px solid {T["accent"]} !important;
+        color: {T["accent_text"]} !important; border-radius: 8px !important;
+    }}
+    .stApp button[data-testid^="stBaseButton-primary"] * {{ color: {T["accent_text"]} !important; }}
+
+    /* ---------- Inputs, text areas, dropdowns ---------- */
+    .stApp [data-baseweb="input"], .stApp [data-baseweb="base-input"],
+    .stApp [data-baseweb="textarea"], .stApp [data-baseweb="select"] > div {{
+        background-color: {T["input_bg"]} !important; border-color: {T["input_border"]} !important;
+    }}
+    .stApp input, .stApp textarea {{
+        background-color: {T["input_bg"]} !important; color: {T["text"]} !important;
+        -webkit-text-fill-color: {T["text"]} !important; caret-color: {T["text"]};
+    }}
+    .stApp input::placeholder, .stApp textarea::placeholder {{
+        color: {T["text_secondary"]} !important; -webkit-text-fill-color: {T["text_secondary"]} !important; opacity: 1;
+    }}
+    .stApp [data-baseweb="select"] *, .stApp [data-baseweb="select"] svg {{
+        color: {T["text"]} !important; fill: {T["text"]} !important;
+    }}
+    /* Streamlit 1.62 widget wrappers (these carry their own white backgrounds) */
+    .stApp [data-testid="stSelectbox"] div[role="group"],
+    .stApp [data-testid="stTextAreaRootElement"],
+    .stApp [data-testid="stTextInputRootElement"] {{
+        background-color: {T["input_bg"]} !important;
+        border: 1px solid {T["input_border"]} !important; border-radius: 8px !important;
+    }}
+    .stApp [data-testid="stSelectbox"] div[role="group"] input {{ border: none !important; }}
+    .stApp [data-testid="stSelectbox"] button, .stApp [data-testid="stSelectbox"] svg {{
+        color: {T["text"]} !important; fill: {T["text"]} !important; background: transparent !important;
+    }}
+    /* Progress bars: themed track and fill */
+    .stApp [data-testid="stProgressBarTrack"] {{ background-color: {T["card_border"]} !important; }}
+    .stApp [data-testid="stProgressBarTrack"] > div {{ background-color: {T["accent"]} !important; }}
+    /* Dropdown option lists render outside .stApp, in a popover layer */
+    [data-baseweb="popover"] ul, [data-baseweb="popover"] [role="listbox"] {{
+        background-color: {T["input_bg"]} !important;
+    }}
+    [data-baseweb="popover"] li {{ background-color: {T["input_bg"]} !important; }}
+    [data-baseweb="popover"] li, [data-baseweb="popover"] li * {{ color: {T["text"]} !important; }}
+    [data-baseweb="popover"] li:hover, [data-baseweb="popover"] li[aria-selected="true"] {{
+        background-color: {T["accent_soft"]} !important;
     }}
 
-    /* Topic style badge (complaint issue / legal template / narrative account) */
+    /* Open dropdown lists (Streamlit 1.62 renders these as role=listbox/option) */
+    [role="listbox"] {{
+        background-color: {T["input_bg"]} !important; border: 1px solid {T["input_border"]} !important;
+    }}
+    [role="listbox"] [role="option"], [role="listbox"] [role="option"] * {{ color: {T["text"]} !important; }}
+    [role="listbox"] [role="option"]:hover, [role="listbox"] [role="option"][aria-selected="true"],
+    [role="listbox"] [role="option"][data-focused] {{ background-color: {T["accent_soft"]} !important; }}
+
+    /* ---------- Code, expanders, uploader, tables, alerts ---------- */
+    .stApp [data-testid="stCode"] pre, .stApp [data-testid="stCode"] code {{
+        background-color: {T["code_bg"]} !important;
+    }}
+    .stApp [data-testid="stCode"] pre *, .stApp [data-testid="stCode"] code {{ color: {T["text"]} !important; }}
+    .stApp [data-testid="stExpander"] details {{
+        background-color: {T["card_bg"]}; border: 1px solid {T["card_border"]} !important; border-radius: 10px;
+    }}
+    .stApp [data-testid="stExpander"] summary {{ background-color: {T["card_bg"]} !important; border-radius: 10px; }}
+    .stApp [data-testid="stExpander"] summary, .stApp [data-testid="stExpander"] summary * {{
+        color: {T["text"]} !important;
+    }}
+    .stApp [data-testid="stIconMaterial"] {{ color: {T["text_secondary"]} !important; }}
+    .stApp [data-testid="stFileUploaderDropzone"] {{
+        background-color: {T["input_bg"]} !important; border: 1px dashed {T["input_border"]} !important;
+    }}
+    .stApp [data-testid="stFileUploaderDropzone"] span, .stApp [data-testid="stFileUploaderDropzone"] small,
+    .stApp [data-testid="stFileUploaderDropzoneInstructions"] * {{ color: {T["text_secondary"]} !important; }}
+    .stApp [data-testid="stFileUploaderFileName"], .stApp [data-testid="stFileUploaderFile"] * {{
+        color: {T["text"]} !important;
+    }}
+    .stApp [data-testid="stDataFrame"] {{ border: 1px solid {T["card_border"]}; border-radius: 8px; }}
+    .stApp [data-testid="stTable"] table, .stApp [data-testid="stTable"] th, .stApp [data-testid="stTable"] td {{
+        color: {T["text"]} !important; background-color: {T["card_bg"]} !important;
+        border-color: {T["card_border"]} !important;
+    }}
+    /* Alert boxes keep Streamlit's tinted background, which follows the page
+       (light tint by day, dark tint by night), so their text follows the theme too */
+    .stApp [data-testid="stAlertContainer"] p, .stApp [data-testid="stAlertContainer"] li,
+    .stApp [data-testid="stAlertContainer"] strong, .stApp [data-testid="stAlertContainer"] span {{
+        color: {T["text"]} !important;
+    }}
+
+    /* ---------- Cards and custom components ---------- */
+    div[data-testid="stMetric"] {{
+        background-color: {T["card_bg"]}; border: 1px solid {T["card_border"]};
+        border-left: 4px solid {T["highlight"]}; border-radius: 10px; padding: 0.9rem 1rem;
+    }}
+    div[data-testid="stMetric"] label, div[data-testid="stMetric"] label * {{ color: {T["text_secondary"]} !important; }}
+    div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] * {{ color: {T["text"]} !important; }}
+    div[data-testid="stMetricDelta"], div[data-testid="stMetricDelta"] * {{ color: {T["text_secondary"]} !important; }}
+
+    .pipeline-step {{
+        background-color: {T["card_bg"]} !important; border: 1px solid {T["card_border"]};
+        border-left: 4px solid {T["highlight"]} !important;
+    }}
+    .pipeline-step-title {{ color: {T["text"]} !important; }}
+    .pipeline-step-desc {{ color: {T["text_secondary"]} !important; }}
+
     .style-badge {{
-        display: inline-block;
-        padding: 0.18rem 0.7rem;
-        border-radius: 999px;
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: #FFFFFF !important;
-        vertical-align: middle;
-        margin: 0.15rem 0 0.9rem 0;
+        display: inline-block; padding: 0.18rem 0.7rem; border-radius: 999px; font-size: 0.8rem;
+        font-weight: 600; color: #FFFFFF !important; vertical-align: middle; margin: 0.15rem 0 0.9rem 0;
     }}
-    .topic-title {{
-        font-size: 1.45rem;
-        font-weight: 700;
-        margin: 0.2rem 0 0.35rem 0;
-        line-height: 1.25;
-    }}
+    .topic-title {{ font-size: 1.45rem; font-weight: 700; margin: 0.2rem 0 0.35rem 0; line-height: 1.25; }}
+    .cloud-title {{ font-size: 1.05rem; font-weight: 700; margin: 0.4rem 0 0.2rem 0; line-height: 1.3; }}
     .complaint-quote {{
-        background-color: {THEME["card_bg"]};
-        border: 1px solid {THEME["card_border"]};
-        border-radius: 10px;
-        padding: 0.9rem 1.1rem;
-        margin-bottom: 0.7rem;
-        font-size: 0.93rem;
-        line-height: 1.55;
-        color: {THEME["text"]};
+        background-color: {T["card_bg"]}; border: 1px solid {T["card_border"]}; border-radius: 10px;
+        padding: 0.9rem 1.1rem; margin-bottom: 0.7rem; font-size: 0.93rem; line-height: 1.55; color: {T["text"]};
     }}
-    .complaint-meta {{
-        font-size: 0.8rem;
-        color: {THEME["text_secondary"]};
-        margin-bottom: 0.35rem;
-    }}
+    .complaint-meta {{ font-size: 0.8rem; color: {T["text_secondary"]} !important; margin-bottom: 0.35rem; }}
 
-    /* Tabs pick up the theme's accent colour */
-    .stTabs [data-baseweb="tab-list"] {{
-        gap: 0.4rem;
-    }}
-    .stTabs [data-baseweb="tab"] p {{
-        font-weight: 600;
-        font-size: 0.98rem;
-    }}
-    .stTabs [aria-selected="true"] p {{
-        color: {THEME["nav_selected_bg"]} !important;
-    }}
-    .stTabs [data-baseweb="tab-highlight"] {{
-        background-color: {THEME["nav_selected_bg"]} !important;
-    }}
+    /* Charts and word clouds (rendered as images) get soft rounded corners */
+    .stApp [data-testid="stImage"] img, .stApp [data-testid="stImageContainer"] img {{ border-radius: 10px; }}
+
+    /* ---------- Tabs ---------- */
+    .stTabs [data-baseweb="tab-list"] {{ gap: 0.4rem; border-bottom: 1px solid {T["card_border"]}; }}
+    .stTabs [data-baseweb="tab"] p {{ font-weight: 600; font-size: 0.98rem; color: {T["text_secondary"]} !important; }}
+    .stTabs [aria-selected="true"] p {{ color: {T["accent"] if selected_theme == "Night" else T["text"]} !important; }}
+    .stTabs [data-baseweb="tab-highlight"] {{ background-color: {T["accent"] if selected_theme == "Night" else T["highlight"]} !important; height: 3px; }}
+    .stTabs [data-baseweb="tab-border"] {{ background-color: {T["card_border"]} !important; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -497,9 +482,12 @@ def get_topic_label(idx, model_choice="NMF"):
 
 
 STYLE_COLORS = {
-    "Complaint issue": "#2f5b93",
-    "Legal template": "#f47a21",
-    "Narrative account": "#2f95b8",
+    style: readable_on(color, "#FFFFFF")   # darkened until white badge text passes 4.5:1
+    for style, color in {
+        "Complaint issue": "#2f5b93",
+        "Legal template": "#f47a21",
+        "Narrative account": "#2f95b8",
+    }.items()
 }
 
 
@@ -535,7 +523,9 @@ def wordcloud_png(freq_items, color_hex, bg_color, width=1000, height=420):
     """Cached word cloud as PNG bytes. freq_items is a tuple of (word, weight)
     pairs so Streamlit can hash it; the colormap runs from the page background
     into the topic's colour so clouds sit naturally on both themes."""
-    cmap = LinearSegmentedColormap.from_list("t", [blend_hex(bg_color, color_hex, 0.45), color_hex])
+    strongest = readable_on(color_hex, bg_color, 3.0)
+    faintest = readable_on(blend_hex(bg_color, strongest, 0.55), bg_color, 3.0)
+    cmap = LinearSegmentedColormap.from_list("t", [faintest, strongest])
     wc = WordCloud(
         width=width, height=height, background_color=bg_color, colormap=cmap,
         max_words=100, prefer_horizontal=0.95, random_state=42,
@@ -1174,10 +1164,11 @@ elif page == "Topic Explorer":
             key=f"deep_topic_{model_choice}",
         )
         color = UI_TOPIC_COLORS[chosen % len(UI_TOPIC_COLORS)]
+        title_color = UI_TOPIC_TEXT[chosen % len(UI_TOPIC_TEXT)]
         rank = order_by_size.index(chosen) + 1
 
         st.markdown(
-            f"<div class='topic-title' style='color:{color};'>Topic {chosen}: "
+            f"<div class='topic-title' style='color:{title_color};'>Topic {chosen}: "
             f"{get_topic_label(chosen, model_choice)}</div>"
             f"{style_badge(get_topic_style(chosen, model_choice))}",
             unsafe_allow_html=True,
@@ -1239,7 +1230,7 @@ elif page == "Topic Explorer":
                 t_terms = topic_top_terms(model, feature_names, topic_idx, n=30)
                 with col:
                     st.markdown(
-                        f"<div class='cloud-title' style='color:{t_color};'>{topic_idx}. "
+                        f"<div class='cloud-title' style='color:{UI_TOPIC_TEXT[topic_idx % len(UI_TOPIC_TEXT)]};'>{topic_idx}. "
                         f"{get_topic_label(topic_idx, model_choice)}</div>",
                         unsafe_allow_html=True,
                     )
@@ -1381,7 +1372,7 @@ elif page == "Try It Yourself":
         feature_names = vectorizer.get_feature_names_out()
 
         best = int(ranked[0])
-        best_color = UI_TOPIC_COLORS[best % len(UI_TOPIC_COLORS)]
+        best_color = UI_TOPIC_TEXT[best % len(UI_TOPIC_TEXT)]
         st.markdown(
             f"<div class='topic-title' style='color:{best_color};'>Best match: Topic {best}, "
             f"{get_topic_label(best, model_choice)}</div>"
