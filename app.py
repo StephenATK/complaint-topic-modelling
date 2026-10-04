@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 from matplotlib.colors import LinearSegmentedColormap
 from wordcloud import WordCloud
 import sys
@@ -18,6 +19,8 @@ import os
 import io
 import re
 import json
+import html
+import hashlib
 import tempfile
 from datetime import datetime
 from fpdf import FPDF, XPos, YPos
@@ -29,6 +32,8 @@ from pptx.enum.shapes import MSO_SHAPE
 sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 from preprocessing import preprocess_text
 from topic_map import build_topic_map_html
+from distribution import topic_counts, summarize
+import speech
 
 st.set_page_config(
     page_title="Customer Complaint Topic Explorer",
@@ -378,6 +383,15 @@ st.markdown(
         color: {T["text"]} !important;
     }}
 
+    /* Recorder and uploaded-file chips keep their own light panels in both themes,
+       so the text and icons inside them stay dark (checked against WCAG 4.5:1) */
+    .stApp [data-testid="stAudioInput"] > div {{
+        background-color: #ffffff !important; border: 1px solid {T["input_border"]}; border-radius: 8px;
+    }}
+    .stApp [data-testid="stAudioInputWaveformTimeCode"] {{ color: #14213d !important; opacity: 1 !important; }}
+    .stApp [data-testid="stFileChip"] {{ background-color: #f4f7fb !important; }}
+    .stApp [data-testid="stFileChip"], .stApp [data-testid="stFileChip"] * {{ color: #14213d !important; }}
+
     /* ---------- Cards and custom components ---------- */
     div[data-testid="stMetric"] {{
         background-color: {T["card_bg"]}; border: 1px solid {T["card_border"]};
@@ -548,7 +562,8 @@ def topic_distribution_chart(dist, model_choice, total_docs, height_per_bar=0.42
     fig, ax = plt.subplots(figsize=(9, height_per_bar * len(order) + 0.9))
     themed_axes(fig, ax)
     colors = [UI_TOPIC_COLORS[i % len(UI_TOPIC_COLORS)] for i in order.index]
-    labels = [f"{i}. {get_topic_label(i, model_choice)}" for i in order.index]
+    labels = [(lbl if lbl == f"Topic {i}" else f"{i}. {lbl}")
+              for i, lbl in ((i, get_topic_label(i, model_choice)) for i in order.index)]
     bars = ax.barh(labels, order.values, color=colors)
     peak = max(order.values) if len(order) else 1
     for bar, value in zip(bars, order.values):
@@ -556,6 +571,7 @@ def topic_distribution_chart(dist, model_choice, total_docs, height_per_bar=0.42
         ax.text(bar.get_width() + peak * 0.012, bar.get_y() + bar.get_height() / 2,
                 f"{value:,}  ({share:.0%})", va="center", fontsize=9, color=THEME["text_secondary"])
     ax.set_xlim(0, peak * 1.2)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))   # whole complaints only
     ax.set_xlabel("Complaints")
     ax.spines[["top", "right"]].set_visible(False)
     fig.tight_layout()
@@ -876,7 +892,73 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-PAGE_NAMES = ["How It Works", "Corpus Overview", "Preprocessing Demo", "Topic Explorer", "Model Comparison", "Try It Yourself", "Analyze & Report"]
+# --- Voice Complaints helpers ----------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def load_speech_model():
+    """Whisper speech model, loaded once per server and shared by every visitor."""
+    return speech.load_model()
+
+
+def get_speech_model():
+    """Returns (model, None) or (None, message). Never raises, so the page can explain problems."""
+    try:
+        return load_speech_model(), None
+    except ImportError:
+        return None, ("Voice features need the faster-whisper package. Run "
+                      "`pip install -r requirements.txt`, then restart the app.")
+    except Exception as err:
+        return None, ("The speech model couldn't be loaded. It downloads automatically the first time "
+                      "it's used, so check the internet connection and try again. "
+                      f"(Details: {type(err).__name__})")
+
+
+def classify_text(text, model_choice, models):
+    """Classify one complaint with the chosen model. result['ok'] is False when none of
+    its words are in the model's vocabulary."""
+    tfidf_vectorizer, count_vectorizer, lda_model, nmf_model, _, _ = models
+    model, vectorizer = (lda_model, count_vectorizer) if model_choice == "LDA" else (nmf_model, tfidf_vectorizer)
+    cleaned = preprocess_text(text)
+    vec = vectorizer.transform([cleaned])
+    if vec.nnz == 0:
+        return {"ok": False, "cleaned": cleaned}
+    raw = model.transform(vec)[0]
+    total = raw.sum()
+    shares = raw / total if total > 0 else raw
+    ranked = [int(i) for i in np.argsort(shares)[::-1][:3]]
+    return {"ok": True, "cleaned": cleaned, "shares": shares, "ranked": ranked, "best": ranked[0],
+            "model": model, "vectorizer": vectorizer}
+
+
+def show_classification(result, model_choice):
+    """Same display as Try It Yourself: best match, writing style, top terms, top three topics."""
+    if not result.get("ok"):
+        st.warning("None of these words appear in the model's vocabulary, so the complaint can't be "
+                   "placed in a topic. Try a longer recording that describes the problem.")
+        return
+    best, shares = result["best"], result["shares"]
+    feature_names = result["vectorizer"].get_feature_names_out()
+    color = UI_TOPIC_TEXT[best % len(UI_TOPIC_TEXT)]
+    st.markdown(
+        f"<div class='topic-title' style='color:{color};'>Best match: Topic {best}, "
+        f"{get_topic_label(best, model_choice)}</div>{style_badge(get_topic_style(best, model_choice))}",
+        unsafe_allow_html=True,
+    )
+    st.caption("Top terms for this topic: " + ", ".join(w for w, _ in topic_top_terms(result["model"], feature_names, best, n=8)))
+    for idx in result["ranked"]:
+        st.progress(float(min(max(shares[idx], 0.0), 1.0)), text=f"{idx}. {get_topic_label(idx, model_choice)}: {shares[idx]:.0%}")
+    vocab = set(feature_names)
+    matched = [w for w in result["cleaned"].split() if w in vocab]
+    if matched:
+        with st.expander("Words the model recognised"):
+            st.write(", ".join(dict.fromkeys(matched)))
+
+
+def fmt_duration(seconds):
+    seconds = int(round(seconds or 0))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+PAGE_NAMES = ["How It Works", "Corpus Overview", "Preprocessing Demo", "Topic Explorer", "Model Comparison", "Try It Yourself", "Voice Complaints", "Analyze & Report"]
 PAGE_ICONS = {
     "How It Works": "🧭",
     "Corpus Overview": "📊",
@@ -884,6 +966,7 @@ PAGE_ICONS = {
     "Topic Explorer": "🔍",
     "Model Comparison": "⚖️",
     "Try It Yourself": "✍️",
+    "Voice Complaints": "🎙️",
     "Analyze & Report": "📤",
 }
 nav_choice = st.sidebar.radio(
@@ -936,8 +1019,8 @@ if page == "How It Works":
     steps = [
         ("🧹", "Clean & Preprocess",
          "Raw complaint text is stripped of redacted placeholders, dollar amounts, URLs, and "
-         "punctuation, then tokenized, stripped of stopwords, and lemmatized so 'calling', "
-         "'called', and 'calls' all collapse to one meaningful term."),
+         "punctuation, then tokenized, stripped of stopwords, and lemmatized, which turns plurals "
+         "into their base form ('calls' becomes 'call')."),
         ("🔢", "Represent as Numbers",
          "Cleaned text is converted into two numeric forms: TF-IDF weighted vectors for NMF, "
          "and raw word counts for LDA — matching how each algorithm is designed to work."),
@@ -971,7 +1054,7 @@ if page == "How It Works":
     st.info(
         "Use the sidebar to explore each stage: **Corpus Overview** and **Preprocessing Demo** "
         "cover steps 1-2, **Topic Explorer** and **Model Comparison** cover steps 3-4, and "
-        "**Try It Yourself** / **Analyze & Report** cover step 5."
+        "**Try It Yourself**, **Voice Complaints** and **Analyze & Report** cover step 5."
     )
     st.stop()
 
@@ -1292,32 +1375,76 @@ elif page == "Model Comparison":
     else:
         st.info("Run `python src/evaluation.py` first to generate data/n_topics_sweep.csv.")
 
-    st.subheader("Summary")
+    st.subheader("All four evaluation criteria")
+    st.caption("The project brief asks for coherence, diversity, interpretability and distribution. "
+               "The two models found different topics, so each is judged on its own 11.")
+
+    rows = []      # (criterion, what it checks, LDA value, NMF value, higher_is_better, formatter)
     metrics_path = "data/final_model_metrics.csv"
     if os.path.exists(metrics_path):
-        comparison_df = pd.read_csv(metrics_path)
-        st.table(comparison_df.set_index("Metric"))
-
-        lda_coh = comparison_df.loc[comparison_df["Metric"] == "Topic Coherence (c_v)", "LDA"].iloc[0]
-        nmf_coh = comparison_df.loc[comparison_df["Metric"] == "Topic Coherence (c_v)", "NMF"].iloc[0]
-        winner = "NMF" if nmf_coh >= lda_coh else "LDA"
-        st.success(
-            f"**{winner}** scores higher on topic coherence "
-            f"({'NMF' if winner == 'NMF' else 'LDA'}: {max(lda_coh, nmf_coh):.3f} vs "
-            f"{'LDA' if winner == 'NMF' else 'NMF'}: {min(lda_coh, nmf_coh):.3f}), "
-            f"suggesting its topics are more internally coherent for this corpus."
-        )
+        m = pd.read_csv(metrics_path).set_index("Metric")
+        rows.append(("Coherence (c_v)", "Do a topic's top words appear together in real complaints?",
+                     float(m.loc["Topic Coherence (c_v)", "LDA"]), float(m.loc["Topic Coherence (c_v)", "NMF"]), True, "{:.3f}"))
+        rows.append(("Diversity", "Share of top words unique to one topic",
+                     float(m.loc["Topic Diversity", "LDA"]), float(m.loc["Topic Diversity", "NMF"]), True, "{:.3f}"))
+    interp_path = "data/interpretability_scores.csv"
+    if os.path.exists(interp_path):
+        ip = pd.read_csv(interp_path).set_index("model")
+        rows.append(("Interpretability (1 to 5)", f"Blind group rating, {int(ip['raters'].max())} raters",
+                     float(ip.loc["LDA", "overall"]), float(ip.loc["NMF", "overall"]), True, "{:.2f}"))
     else:
-        comparison_df = pd.DataFrame({
-            "Metric": ["Topic Coherence (c_v)", "Topic Diversity"],
-            "LDA": ["-", "-"],
-            "NMF": ["-", "-"],
-        })
-        st.table(comparison_df.set_index("Metric"))
-        st.caption(
-            "Run `python src/final_metrics.py` from the terminal to compute these "
-            "numbers automatically from your final trained models."
-        )
+        rows.append(("Interpretability (1 to 5)", "Blind group rating", None, None, True, "{:.2f}"))
+    dist = {}
+    if models_ready:
+        _, _, _, _, lda_doc_topic_cmp, nmf_doc_topic_cmp = load_models()
+        for name, dt in [("LDA", lda_doc_topic_cmp), ("NMF", nmf_doc_topic_cmp)]:
+            counts = topic_counts(dt); dist[name] = (counts, summarize(counts))
+        rows.append(("Distribution evenness (0 to 1)", "How evenly complaints spread across topics",
+                     dist["LDA"][1]["evenness"], dist["NMF"][1]["evenness"], True, "{:.3f}"))
+        rows.append(("Largest topic", "Share of complaints in the biggest topic",
+                     dist["LDA"][1]["largest_share"], dist["NMF"][1]["largest_share"], None, "{:.1%}"))
+        rows.append(("Topics under 2%", "Topics that hold almost no complaints",
+                     dist["LDA"][1]["topics_under_2pct"], dist["NMF"][1]["topics_under_2pct"], None, "{:d}"))
+
+    def show(v, f):
+        return "Not measured yet" if v is None else f.format(v)
+
+    def leader(lda, nmf, higher):
+        if higher is None or lda is None or nmf is None or abs(lda - nmf) < 1e-9:
+            return ""
+        return "NMF" if (nmf > lda) == higher else "LDA"
+
+    table_rows = [{"Criterion": c, "What it checks": w, "LDA": show(l, f), "NMF": show(n, f), "Ahead": leader(l, n, h)}
+                  for c, w, l, n, h, f in rows]
+    st.table(pd.DataFrame(table_rows).set_index("Criterion"))
+
+    leads = {"NMF": [], "LDA": []}
+    for c, w, l, n, h, f in rows:
+        who = leader(l, n, h)
+        if who:
+            leads[who].append(c.split(" (")[0].lower())
+    parts = []
+    for who in ["NMF", "LDA"]:
+        if leads[who]:
+            items = leads[who]
+            listed = items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+            parts.append(f"{who} is ahead on {listed}.")
+    if parts:
+        st.success(" ".join(parts))
+    if not os.path.exists(interp_path):
+        st.caption("Interpretability needs the group's ratings: run `python src/make_rating_sheet.py`, have each "
+                   "member fill in a copy, then run `python src/score_ratings.py`.")
+    st.caption("Evenness is reported rather than treated as a strict win. Real complaint themes are not equally "
+               "common, so a perfectly even spread isn't the goal. The warning signs are a topic holding almost "
+               "nothing, or one topic holding most complaints.")
+
+    if dist:
+        st.subheader("How the complaints spread")
+        col_l, col_n = st.columns(2)
+        for col, name in [(col_l, "LDA"), (col_n, "NMF")]:
+            with col:
+                st.markdown(f"**{name}**")
+                st.pyplot(topic_distribution_chart(dist[name][0], name, dist[name][1]["complaints"]))
 
 # ============================================================
 # PAGE: Try It Yourself
@@ -1394,6 +1521,136 @@ elif page == "Try It Yourself":
         if matched:
             with st.expander("Words the model recognised"):
                 st.write(", ".join(dict.fromkeys(matched)))
+
+# ============================================================
+# PAGE: Voice Complaints
+# ============================================================
+elif page == "Voice Complaints":
+    page_header("Voice Complaints", "Record or upload spoken complaints, turn them into text, and see which topics they fall under.")
+
+    if not models_ready:
+        st.warning("Run `python src/modeling.py` from the terminal first to train the models.")
+        st.stop()
+
+    models = load_models()
+    model_choice = st.selectbox("Model", MODEL_OPTIONS, format_func=lambda m: MODEL_CAPTIONS[m], key="voice_model")
+    st.caption("Speech is turned into text by OpenAI's Whisper model (English, base size), running inside this app. "
+               "Recordings are not saved. The first transcription after the app wakes up can take up to a "
+               "minute while the speech model downloads.")
+
+    tab_rec, tab_up = st.tabs(["🎙️ Record a complaint", "📁 Upload recordings"])
+
+    # ---------------- Record ----------------
+    with tab_rec:
+        st.markdown("Click the microphone, speak for 10 to 30 seconds, then click it again to stop. "
+                    "Two or three sentences classify more reliably than one.")
+        recording = st.audio_input("Record a complaint", key="voice_recording")
+        if recording is not None:
+            audio_bytes = recording.getvalue()
+            signature = hashlib.md5(audio_bytes).hexdigest()
+            ready = True
+            if st.session_state.get("voice_signature") != signature:      # a new recording: transcribe it once
+                whisper, problem = get_speech_model()
+                if problem:
+                    st.error(problem); ready = False
+                else:
+                    with st.spinner("Turning speech into text..."):
+                        try:
+                            text, seconds = speech.transcribe(whisper, io.BytesIO(audio_bytes))
+                            st.session_state["voice_signature"] = signature
+                            st.session_state["voice_transcript"] = text
+                            st.session_state["voice_seconds"] = seconds
+                        except Exception as err:
+                            st.error(f"The recording couldn't be read ({type(err).__name__}). Please record again.")
+                            ready = False
+            if ready:
+                transcript = st.text_area("Transcript", key="voice_transcript", height=120,
+                                          help="Fix any misheard words, then press Ctrl+Enter to classify again.")
+                st.caption(f"Recording length {fmt_duration(st.session_state.get('voice_seconds'))}. "
+                           "Edit the transcript and press Ctrl+Enter to classify again.")
+                if transcript.strip():
+                    show_classification(classify_text(transcript, model_choice, models), model_choice)
+                else:
+                    st.warning("No speech was recognised. Try again, a little closer to the microphone.")
+
+    # ---------------- Upload ----------------
+    with tab_up:
+        st.markdown("Upload one or more recordings of customer complaints, such as saved calls or voice notes. "
+                    "Each one is transcribed and given a topic.")
+        files = st.file_uploader("Recordings", type=["wav", "mp3", "m4a", "ogg", "oga", "opus", "flac", "webm", "aac", "mp4"],
+                                 accept_multiple_files=True, key="voice_files")
+        st.caption("Works best when the recording is mostly the customer speaking. On two-person calls, the "
+                   "agent's words are transcribed too, which can blur the topic. Longer recordings take longer to transcribe.")
+        if files and len(files) > 20:
+            st.warning("That's a lot of recordings at once. Large batches can be slow on the free hosting tier, so consider splitting them.")
+        if files and st.button(f"Transcribe and classify {len(files)} recording{'s' if len(files) != 1 else ''}",
+                               type="primary", key="voice_run"):
+            whisper, problem = get_speech_model()
+            if problem:
+                st.error(problem)
+            else:
+                rows = []
+                progress = st.progress(0.0, text="Starting...")
+                for i, f in enumerate(files):
+                    progress.progress(i / len(files), text=f"Transcribing {f.name} ({i + 1} of {len(files)})")
+                    note = ""
+                    try:
+                        text, seconds = speech.transcribe(whisper, io.BytesIO(f.getvalue()))
+                    except Exception as err:
+                        text, seconds, note = "", 0.0, f"Couldn't read this file ({type(err).__name__})"
+                    result = classify_text(text, model_choice, models) if text.strip() else {"ok": False}
+                    if not note and not text.strip():
+                        note = "No speech recognised"
+                    elif not note and not result.get("ok"):
+                        note = "No words the model recognises"
+                    best = result["best"] if result.get("ok") else None
+                    rows.append({"file": f.name, "seconds": seconds, "transcript": text, "topic": best,
+                                 "confidence": float(result["shares"][best]) if best is not None else None,
+                                 "note": note, "result": result})
+                progress.progress(1.0, text=f"Done: {len(files)} recording{'s' if len(files) != 1 else ''} processed")
+                st.session_state["voice_batch"] = {"model": model_choice, "rows": rows}
+
+        batch = st.session_state.get("voice_batch")
+        if batch:
+            used, rows = batch["model"], batch["rows"]
+            done = [r for r in rows if r["topic"] is not None]
+            st.subheader("Results")
+            if used != model_choice:
+                st.caption(f"These results used {used}. Run them again to use {model_choice}.")
+            def style_of(r):
+                return (get_topic_style(r["topic"], used) or "") if r["topic"] is not None else ""
+            table = pd.DataFrame([{
+                "Recording": r["file"], "Length": fmt_duration(r["seconds"]),
+                "Topic": f"{r['topic']}. {get_topic_label(r['topic'], used)}" if r["topic"] is not None else "",
+                "Style": style_of(r), "Confidence": r["confidence"], "Transcript": r["transcript"], "Note": r["note"],
+            } for r in rows])
+            st.dataframe(table, width="stretch", hide_index=True, column_config={
+                "Confidence": st.column_config.ProgressColumn("Confidence", min_value=0.0, max_value=1.0, format="%.2f"),
+                "Transcript": st.column_config.TextColumn("Transcript", width="large"),
+            })
+            export = pd.DataFrame([{
+                "recording": r["file"], "length_seconds": round(r["seconds"], 1), "transcript": r["transcript"],
+                "topic_number": r["topic"], "topic_name": get_topic_label(r["topic"], used) if r["topic"] is not None else "",
+                "writing_style": style_of(r), "confidence": round(r["confidence"], 3) if r["confidence"] is not None else None,
+                "model": used, "note": r["note"],
+            } for r in rows])
+            st.download_button("⬇️ Download results (CSV)", data=export.to_csv(index=False).encode("utf-8"),
+                               file_name="voice_complaint_topics.csv", mime="text/csv", key="voice_csv")
+            if len(done) >= 2:
+                st.subheader("Topics in these recordings")
+                counts = pd.Series([r["topic"] for r in done]).value_counts()
+                st.pyplot(topic_distribution_chart(counts, used, len(done)))
+            st.subheader("Each recording")
+            for r in rows:
+                label = (f"{r['file']}: {get_topic_label(r['topic'], used)}" if r["topic"] is not None
+                         else f"{r['file']}: {r['note']}")
+                with st.expander(label):
+                    if r["transcript"]:
+                        st.markdown(f"<div class='complaint-quote'>{html.escape(r['transcript'])}</div>", unsafe_allow_html=True)
+                    if r["result"].get("ok"):
+                        show_classification(r["result"], used)
+                    elif r["note"]:
+                        st.caption(r["note"])
 
 # ============================================================
 # PAGE: Analyze & Report

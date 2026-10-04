@@ -13,3 +13,12 @@ gensim==4.4.0
 wordcloud==1.9.6
 fpdf2==2.8.8
 python-pptx==1.0.2
+# Voice Complaints page: speech-to-text with faster-whisper (Whisper base.en, CPU).
+# The whole chain is pinned: faster-whisper 1.2.1 breaks with PyAV 19 (it passes an
+# option PyAV removed), so av stays at 16.0.1, a version tested to work.
+faster-whisper==1.2.1
+av==16.0.1
+ctranslate2==4.8.2
+huggingface-hub==1.33.0
+tokenizers==0.23.2
+onnxruntime==1.24.4
